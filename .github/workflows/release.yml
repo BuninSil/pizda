@@ -21,11 +21,13 @@ jobs:
           distribution: temurin
           java-version: '17'
 
-      - name: Set up Android SDK
-        uses: android-actions/setup-android@v3
-
-      - name: Install SDK packages
-        run: sdkmanager "platforms;android-34" "build-tools;34.0.0" "platform-tools"
+      - name: Install Android SDK packages
+        run: |
+          # ubuntu-latest ships the Android SDK preinstalled; just make sure the
+          # exact packages we need are present and licenses are accepted.
+          SDKMANAGER="$ANDROID_SDK_ROOT/cmdline-tools/latest/bin/sdkmanager"
+          yes | "$SDKMANAGER" --licenses >/dev/null 2>&1 || true
+          "$SDKMANAGER" "platform-tools" "platforms;android-34" "build-tools;34.0.0"
 
       - name: Decode release keystore (optional, else use committed shared key)
         env:
