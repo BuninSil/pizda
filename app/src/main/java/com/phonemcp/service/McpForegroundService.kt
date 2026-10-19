@@ -211,7 +211,7 @@ class McpForegroundService : Service() {
             val result = ClaudeLauncher.callClaude(applicationContext)
             when (result) {
                 ClaudeLauncher.Result.STARTED -> {
-                    watchdog?.start()
+                    if (Settings.watchdogEnabled(applicationContext)) watchdog?.start()
                     updateNotification("Голосовой режим Claude запущен", AppState.connectorUrl)
                 }
                 ClaudeLauncher.Result.NEED_LEARNING ->

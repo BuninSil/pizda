@@ -186,6 +186,70 @@ class ControllerAccessibilityService : AccessibilityService() {
 
     private fun shortClass(c: String): String = c.substringAfterLast('.')
 
+    /**
+     * Compact, token-cheap view of the screen: a flat list of only the visible,
+     * meaningful elements (ones with text/desc, or clickable/editable), with just
+     * text/desc/id/flags and the tap centre — no empty containers, no bounds.
+     */
+    fun dumpScreenCompact(maxNodes: Int = 150): JSONObject {
+        val out = JSONObject()
+        out.put("package", activePackage() ?: JSONObject.NULL)
+        val elements = JSONArray()
+        val root = rootInActiveWindow
+        if (root != null) {
+            val stack = ArrayDeque<AccessibilityNodeInfo>()
+            stack.add(root)
+            val r = Rect()
+            var guard = 0
+            while (stack.isNotEmpty() && elements.length() < maxNodes && guard < 4000) {
+                guard++
+                val n = stack.removeFirst()
+                val text = n.text?.toString()?.ifBlank { null }
+                val desc = n.contentDescription?.toString()?.ifBlank { null }
+                val meaningful = (text != null || desc != null || n.isClickable || n.isEditable)
+                if (meaningful && n.isVisibleToUser) {
+                    n.getBoundsInScreen(r)
+                    if (r.width() > 0 && r.height() > 0) {
+                        val e = JSONObject()
+                        text?.let { e.put("text", it) }
+                        desc?.let { e.put("desc", it) }
+                        n.viewIdResourceName?.let { e.put("id", it) }
+                        if (n.isClickable) e.put("clickable", true)
+                        if (n.isEditable) e.put("editable", true)
+                        if (n.isCheckable) e.put("checked", n.isChecked)
+                        e.put("cx", r.centerX())
+                        e.put("cy", r.centerY())
+                        elements.put(e)
+                    }
+                }
+                for (i in 0 until n.childCount) n.getChild(i)?.let { stack.add(it) }
+            }
+        }
+        out.put("elements", elements)
+        out.put("count", elements.length())
+        return out
+    }
+
+    /** Polls for an element (view id or visible text) up to timeoutMs. */
+    fun waitForElement(selector: String, timeoutMs: Long): Boolean {
+        val deadline = System.currentTimeMillis() + timeoutMs.coerceIn(0, 60000)
+        while (System.currentTimeMillis() < deadline) {
+            if (elementPresent(selector)) return true
+            try { Thread.sleep(200) } catch (_: InterruptedException) { return false }
+        }
+        return elementPresent(selector)
+    }
+
+    /** Waits until the given package is the foreground app (or timeout). */
+    fun waitForPackage(pkg: String, timeoutMs: Long): Boolean {
+        val deadline = System.currentTimeMillis() + timeoutMs.coerceIn(0, 60000)
+        while (System.currentTimeMillis() < deadline) {
+            if (activePackage() == pkg) return true
+            try { Thread.sleep(200) } catch (_: InterruptedException) { return false }
+        }
+        return activePackage() == pkg
+    }
+
     // --- Screenshot (API 30+) --------------------------------------------
 
     fun takeScreenshotBase64(): String? {
@@ -275,14 +339,78 @@ class ControllerAccessibilityService : AccessibilityService() {
         return tap(r.centerX(), r.centerY())
     }
 
-    fun typeText(text: String): Boolean {
-        val focused = rootInActiveWindow?.findFocus(AccessibilityNodeInfo.FOCUS_INPUT)
+    private fun focusedEditable(): AccessibilityNodeInfo? =
+        rootInActiveWindow?.findFocus(AccessibilityNodeInfo.FOCUS_INPUT)
             ?: findFirstEditable(rootInActiveWindow)
-            ?: return false
+
+    private fun setText(node: AccessibilityNodeInfo, text: String): Boolean {
         val args = Bundle().apply {
             putCharSequence(AccessibilityNodeInfo.ACTION_ARGUMENT_SET_TEXT_CHARSEQUENCE, text)
         }
-        return focused.performAction(AccessibilityNodeInfo.ACTION_SET_TEXT, args)
+        return node.performAction(AccessibilityNodeInfo.ACTION_SET_TEXT, args)
+    }
+
+    /** replace=false appends to the field's current text; replace=true overwrites it. */
+    fun typeText(text: String, replace: Boolean): Boolean {
+        val node = focusedEditable() ?: return false
+        val newText = if (replace) text else (node.text?.toString() ?: "") + text
+        return setText(node, newText)
+    }
+
+    fun clearText(): Boolean {
+        val node = focusedEditable() ?: return false
+        return setText(node, "")
+    }
+
+    fun backspace(): Boolean {
+        val node = focusedEditable() ?: return false
+        val cur = node.text?.toString() ?: ""
+        if (cur.isEmpty()) return true
+        return setText(node, cur.substring(0, cur.length - 1))
+    }
+
+    fun deleteForward(): Boolean {
+        // Without a reliable cursor position, treat forward-delete like clearing
+        // the last character; good enough for most fields.
+        return backspace()
+    }
+
+    fun pressEnter(): Boolean {
+        val node = focusedEditable() ?: return false
+        if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.R) {
+            if (node.performAction(AccessibilityNodeInfo.AccessibilityAction.ACTION_IME_ENTER.id)) return true
+        }
+        // Fallback: append a newline.
+        val cur = node.text?.toString() ?: ""
+        return setText(node, cur + "\n")
+    }
+
+    fun paste(): Boolean {
+        val node = focusedEditable() ?: return false
+        return node.performAction(AccessibilityNodeInfo.ACTION_PASTE)
+    }
+
+    /** True if a node matching the selector (view id or visible text) is present. */
+    fun elementPresent(selector: String): Boolean = findNode(selector) != null
+
+    // --- System panels ----------------------------------------------------
+
+    fun openNotifications(): Boolean = performGlobalAction(GLOBAL_ACTION_NOTIFICATIONS)
+
+    fun openQuickSettings(): Boolean =
+        if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.N)
+            performGlobalAction(GLOBAL_ACTION_QUICK_SETTINGS) else false
+
+    fun closePanels(): Boolean {
+        // GLOBAL_ACTION_DISMISS_NOTIFICATION_SHADE (API 31+) is the sanctioned way,
+        // but on HyperOS the Control Center can linger — follow up with BACK.
+        var ok = false
+        if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.S) {
+            ok = performGlobalAction(GLOBAL_ACTION_DISMISS_NOTIFICATION_SHADE)
+        }
+        // BACK reliably collapses a stuck shade/control-center on MIUI/HyperOS.
+        back()
+        return ok || true
     }
 
     private fun findFirstEditable(node: AccessibilityNodeInfo?): AccessibilityNodeInfo? {

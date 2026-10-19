@@ -65,10 +65,14 @@ class SilenceWatchdog(
             return
         }
 
-        // 3) call dropped: only meaningful when we did NOT navigate away ourselves
+        // 3) call dropped: only meaningful when we did NOT navigate away ourselves.
+        // Don't cry "dropped" just because Claude went to the background — if the
+        // mic is still active, the voice call is alive. Only flag a drop when
+        // Claude isn't foreground AND nothing is recording.
         if (!Settings.returnAfterStart(context) &&
             svc.activePackage() != VoiceSession.CLAUDE_PACKAGE &&
-            svc.activePackage() != context.packageName
+            svc.activePackage() != context.packageName &&
+            !isMicActive()
         ) {
             fire("звонок в Claude, похоже, оборвался")
             return
@@ -79,6 +83,16 @@ class SilenceWatchdog(
         if (VoiceSession.idleMs() > timeoutMs) {
             fire("нет команд дольше ${Settings.silenceTimeoutSec(context)} сек")
             return
+        }
+    }
+
+    /** True if any app is currently recording audio (i.e. a voice call is live). */
+    private fun isMicActive(): Boolean {
+        return try {
+            val am = context.getSystemService(Context.AUDIO_SERVICE) as android.media.AudioManager
+            am.activeRecordingConfigurations.isNotEmpty()
+        } catch (e: Exception) {
+            false
         }
     }
 

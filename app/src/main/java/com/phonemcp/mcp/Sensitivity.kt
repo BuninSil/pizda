@@ -34,4 +34,18 @@ object Sensitivity {
         if (pkg == null) return false
         return pkg == "com.android.settings" || pkg.endsWith(".settings")
     }
+
+    // Messengers where pressing Enter sends a message — treat enter as a send.
+    private val MESSENGERS = setOf(
+        "org.telegram.messenger", "org.thunderdog.challegram",
+        "com.whatsapp", "com.whatsapp.w4b",
+        "com.viber.voip", "org.thoughtcrime.securesms", // Signal
+        "com.facebook.orca", "com.instagram.android",
+        "com.vkontakte.android", "com.vk.im",
+        "ru.ok.android", "com.google.android.apps.messaging",
+        "com.discord", "com.skype.raider", "com.tencent.mm",
+        "com.yandex.messenger", "im.threema.app"
+    )
+
+    fun isMessenger(pkg: String?): Boolean = pkg != null && MESSENGERS.contains(pkg)
 }

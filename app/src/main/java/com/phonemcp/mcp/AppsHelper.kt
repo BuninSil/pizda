@@ -30,27 +30,34 @@ object AppsHelper {
         return arr
     }
 
-    /** Accepts an exact package name or a (case-insensitive) label substring. */
-    fun launch(context: Context, query: String): Boolean {
+    /**
+     * Resolve a query (exact package or case-insensitive label substring) to a
+     * launchable package name, WITHOUT launching it.
+     */
+    fun resolve(context: Context, query: String): String? {
         val pm = context.packageManager
         val q = query.trim()
-
-        // Exact package first.
-        pm.getLaunchIntentForPackage(q)?.let {
-            it.addFlags(Intent.FLAG_ACTIVITY_NEW_TASK)
-            context.startActivity(it)
-            return true
-        }
-
+        if (pm.getLaunchIntentForPackage(q) != null) return q
         val apps = listLaunchable(context)
-        val match = apps.firstOrNull { it.label.equals(q, ignoreCase = true) }
+        return (apps.firstOrNull { it.label.equals(q, ignoreCase = true) }
             ?: apps.firstOrNull { it.label.contains(q, ignoreCase = true) }
-            ?: apps.firstOrNull { it.pkg.contains(q, ignoreCase = true) }
-            ?: return false
+            ?: apps.firstOrNull { it.pkg.contains(q, ignoreCase = true) })?.pkg
+    }
 
-        val launch = pm.getLaunchIntentForPackage(match.pkg) ?: return false
+    /** Launch a resolved package. @return the package, or null on failure. */
+    fun launchPackage(context: Context, pkg: String): String? {
+        val launch = context.packageManager.getLaunchIntentForPackage(pkg) ?: return null
         launch.addFlags(Intent.FLAG_ACTIVITY_NEW_TASK)
         context.startActivity(launch)
-        return true
+        return pkg
+    }
+
+    /**
+     * Accepts an exact package name or a (case-insensitive) label substring.
+     * @return the launched package name, or null if nothing matched / failed.
+     */
+    fun launch(context: Context, query: String): String? {
+        val pkg = resolve(context, query) ?: return null
+        return launchPackage(context, pkg)
     }
 }

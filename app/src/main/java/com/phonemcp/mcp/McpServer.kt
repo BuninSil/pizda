@@ -55,9 +55,7 @@ class McpServer(
 
     private fun handlePost(session: IHTTPSession): Response {
         val body = try {
-            val map = HashMap<String, String>()
-            session.parseBody(map)
-            map["postData"] ?: ""
+            readBodyUtf8(session)
         } catch (e: Exception) {
             return jsonError(null, -32700, "parse error")
         }
@@ -77,14 +75,34 @@ class McpServer(
                 if (resp != null) responses.put(resp)
             }
             return if (responses.length() == 0)
-                newFixedLengthResponse(Response.Status.ACCEPTED, "application/json", "")
+                newFixedLengthResponse(Response.Status.ACCEPTED, JSON_MIME, "")
             else ok(responses.toString())
         }
 
         val req = parsed as JSONObject
         val resp = handleRpc(req)
-            ?: return newFixedLengthResponse(Response.Status.ACCEPTED, "application/json", "")
+            ?: return newFixedLengthResponse(Response.Status.ACCEPTED, JSON_MIME, "")
         return ok(resp.toString())
+    }
+
+    /**
+     * Read the request body as UTF-8. NanoHTTPD's parseBody decodes bytes as
+     * ISO-8859-1, which mangles Cyrillic (and any non-latin) tool arguments into
+     * "???". We read the raw Content-Length bytes straight from the body stream
+     * instead and decode them as UTF-8.
+     */
+    private fun readBodyUtf8(session: IHTTPSession): String {
+        val len = session.headers["content-length"]?.toIntOrNull() ?: 0
+        if (len <= 0) return ""
+        val buf = ByteArray(len)
+        val input = session.inputStream
+        var read = 0
+        while (read < len) {
+            val r = input.read(buf, read, len - read)
+            if (r < 0) break
+            read += r
+        }
+        return String(buf, 0, read, Charsets.UTF_8)
     }
 
     /** @return the JSON-RPC response object, or null for notifications (no id). */
@@ -128,13 +146,17 @@ class McpServer(
             .put("error", JSONObject().put("code", code).put("message", message))
 
     private fun ok(bodyJson: String): Response {
-        val resp = newFixedLengthResponse(Response.Status.OK, "application/json", bodyJson)
+        val resp = newFixedLengthResponse(Response.Status.OK, JSON_MIME, bodyJson)
         resp.addHeader("Mcp-Session-Id", sessionId)
         return resp
     }
 
     private fun jsonError(id: Any?, code: Int, message: String): Response =
-        newFixedLengthResponse(Response.Status.OK, "application/json", rpcError(id, code, message).toString())
+        newFixedLengthResponse(Response.Status.OK, JSON_MIME, rpcError(id, code, message).toString())
+
+    private companion object {
+        const val JSON_MIME = "application/json; charset=utf-8"
+    }
 
     private val sessionId: String by lazy {
         val b = ByteArray(16)

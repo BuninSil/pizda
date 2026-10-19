@@ -25,9 +25,10 @@ class McpTools(private val context: Context) {
 
         tools.put(tool(
             "get_screen",
-            "Return the accessibility tree of the current screen (text, ids, clickability, " +
-                "on-screen coordinates) and the package of the foreground app. $untrustedNote",
-            obj()
+            "Return the current screen as a compact flat list of visible meaningful elements " +
+                "(text, desc, id, clickable/editable/checked, tap centre cx/cy) plus the foreground " +
+                "package. Pass full=true for the detailed nested tree with bounds. $untrustedNote",
+            obj("full" to boolProp("true = detailed nested tree (default false = compact list)"))
         ))
 
         tools.put(tool(
@@ -82,19 +83,51 @@ class McpTools(private val context: Context) {
 
         tools.put(tool(
             "type_text",
-            "Type text into the currently focused input field. If the field label looks sensitive " +
-                "the owner must confirm.",
-            obj("text" to strProp("text to type")),
+            "Type text into the currently focused input field. By default it APPENDS to the current " +
+                "text; pass replace=true to overwrite. Sensitive-looking text asks for confirmation.",
+            obj("text" to strProp("text to type"), "replace" to boolProp("true = overwrite field (default false = append)")),
             listOf("text")
         ))
+
+        tools.put(tool("clear_text", "Clear the currently focused input field.", obj()))
+
+        tools.put(tool(
+            "press_key",
+            "Press a key in the focused field: \"enter\", \"backspace\" or \"delete\". In messengers, " +
+                "enter counts as SEND and requires on-device confirmation.",
+            obj("key" to strProp("enter | backspace | delete")),
+            listOf("key")
+        ))
+
+        tools.put(tool("set_clipboard", "Put text on the clipboard.", obj("text" to strProp("text")), listOf("text")))
+        tools.put(tool("get_clipboard", "Read the clipboard text (may be empty if the OS blocks background reads). $untrustedNote", obj()))
+        tools.put(tool("paste", "Paste the clipboard into the focused field.", obj()))
 
         tools.put(tool("press_back", "Press the Back button.", obj()))
         tools.put(tool("press_home", "Go to the home screen.", obj()))
         tools.put(tool("open_recents", "Open the recent-apps overview.", obj()))
 
+        tools.put(tool("open_notifications", "Open the notification shade.", obj()))
+        tools.put(tool("open_quick_settings", "Open quick settings / control center.", obj()))
+        tools.put(tool("close_panels", "Close the notification shade / control center.", obj()))
+
+        tools.put(tool(
+            "wait_for",
+            "Wait until an element (by view id or visible text) appears, up to timeout_ms (default 5000, max 60000).",
+            obj("selector" to strProp("view id or visible text"), "timeout_ms" to intProp("timeout, ms")),
+            listOf("selector")
+        ))
+        tools.put(tool(
+            "wait",
+            "Sleep for ms milliseconds (max 15000).",
+            obj("ms" to intProp("milliseconds")),
+            listOf("ms")
+        ))
+
         tools.put(tool(
             "open_app",
-            "Launch an app by package name or (case-insensitive) label. Blacklisted apps are refused.",
+            "Launch an app by package name or (case-insensitive) label, then wait until it is in the " +
+                "foreground. Blacklisted apps are refused.",
             obj("name" to strProp("package name or app label")),
             listOf("name")
         ))
@@ -103,6 +136,32 @@ class McpTools(private val context: Context) {
             "list_apps",
             "List launchable apps as {label, package}. $untrustedNote",
             obj()
+        ))
+
+        tools.put(tool(
+            "set_volume",
+            "Set a volume stream to a percentage. stream: media|ring|alarm|notification|call.",
+            obj("stream" to strProp("media | ring | alarm | notification | call"), "percent" to intProp("0-100")),
+            listOf("stream", "percent")
+        ))
+        tools.put(tool("toggle_flashlight", "Toggle the flashlight (torch).", obj()))
+        tools.put(tool(
+            "open_settings",
+            "Open a system settings screen: wifi|bluetooth|display|sound|location|apps|battery|data|airplane|nfc|storage|security|date.",
+            obj("target" to strProp("settings screen key")),
+            listOf("target")
+        ))
+        tools.put(tool(
+            "set_brightness",
+            "Set screen brightness 0-100 (needs WRITE_SETTINGS; the app will request it if missing).",
+            obj("percent" to intProp("0-100")),
+            listOf("percent")
+        ))
+        tools.put(tool(
+            "open_url",
+            "Open an http/https URL via the system (opens in the matching app, e.g. Drom/Avito). Only http/https.",
+            obj("url" to strProp("http(s) URL")),
+            listOf("url")
         ))
 
         return tools
@@ -148,7 +207,9 @@ class McpTools(private val context: Context) {
         checkBlacklist(svc)
 
         return when (name) {
-            "get_screen" -> text(svc.dumpScreen().toString())
+            "get_screen" ->
+                if (a.optBoolean("full", false)) text(svc.dumpScreen().toString())
+                else text(svc.dumpScreenCompact().toString())
 
             "screenshot" -> {
                 val b64 = svc.takeScreenshotBase64()
@@ -183,26 +244,114 @@ class McpTools(private val context: Context) {
 
             "type_text" -> {
                 val t = a.getString("text")
+                val replace = a.optBoolean("replace", false)
                 Sensitivity.reasonFor(t)?.let { requireConfirm("ввести текст", it) }
-                ok(svc.typeText(t), "type_text (${t.length} chars)")
+                ok(svc.typeText(t, replace), "type_text (${t.length} chars${if (replace) ", replace" else ""})")
             }
+
+            "clear_text" -> ok(svc.clearText(), "clear_text")
+
+            "press_key" -> {
+                when (a.getString("key").lowercase()) {
+                    "enter" -> {
+                        if (Sensitivity.isMessenger(svc.activePackage())) {
+                            requireConfirm("нажать Enter (отправка сообщения)", "мессенджер: ${svc.activePackage()}")
+                        }
+                        ok(svc.pressEnter(), "press_key enter")
+                    }
+                    "backspace" -> ok(svc.backspace(), "press_key backspace")
+                    "delete" -> ok(svc.deleteForward(), "press_key delete")
+                    else -> error("unknown key (use enter|backspace|delete)")
+                }
+            }
+
+            "set_clipboard" -> { setClipboard(a.getString("text")); text("clipboard set") }
+            "get_clipboard" -> text(getClipboard())
+            "paste" -> ok(svc.paste(), "paste")
 
             "press_back" -> ok(svc.back(), "back")
             "press_home" -> ok(svc.home(), "home")
             "open_recents" -> ok(svc.recents(), "recents")
 
+            "open_notifications" -> ok(svc.openNotifications(), "open_notifications")
+            "open_quick_settings" -> ok(svc.openQuickSettings(), "open_quick_settings")
+            "close_panels" -> ok(svc.closePanels(), "close_panels")
+
+            "wait_for" -> {
+                val sel = a.getString("selector")
+                val t = if (a.has("timeout_ms")) a.getLong("timeout_ms") else 5000L
+                val found = svc.waitForElement(sel, t)
+                if (found) text("found: $sel") else error("not found within ${t}ms: $sel")
+            }
+            "wait" -> {
+                val ms = a.getLong("ms").coerceIn(0, 15000)
+                try { Thread.sleep(ms) } catch (_: InterruptedException) {}
+                text("waited ${ms}ms")
+            }
+
             "open_app" -> {
                 val q = a.getString("name")
-                // Refuse launching a blacklisted target too.
-                val launched = AppsHelper.launch(context, q)
-                if (!launched) return error("app not found or could not launch: $q")
-                text("launched: $q")
+                val pkg = AppsHelper.resolve(context, q)
+                    ?: return error("app not found: $q")
+                // Refuse launching a blacklisted target BEFORE opening it.
+                if (Blacklist.isBlocked(context, pkg)) return error("app '$pkg' is blacklisted")
+                AppsHelper.launchPackage(context, pkg) ?: return error("could not launch: $pkg")
+                val fg = svc.waitForPackage(pkg, 6000)
+                text("launched: $pkg" + if (fg) " (foreground)" else " (not foreground yet)")
             }
 
             "list_apps" -> text(AppsHelper.listAsJson(context).toString())
 
+            "set_volume" -> {
+                val ok = SystemHelper.setVolume(context, a.getString("stream"), a.getInt("percent"))
+                if (ok) text("volume set") else error("could not set volume (stream?/DND?)")
+            }
+            "toggle_flashlight" ->
+                if (SystemHelper.toggleFlashlight(context)) text("flashlight toggled")
+                else error("no flashlight / camera busy")
+            "open_settings" ->
+                if (SystemHelper.openSettings(context, a.getString("target"))) text("opened settings")
+                else error("could not open settings")
+            "set_brightness" -> {
+                val err = SystemHelper.setBrightness(context, a.getInt("percent"))
+                if (err == null) text("brightness set") else error(err)
+            }
+            "open_url" -> {
+                val err = SystemHelper.openUrl(context, a.getString("url"))
+                if (err == null) text("opened url") else error(err)
+            }
+
             else -> error("unknown tool: $name")
         }
+    }
+
+    // --- Clipboard (must run on the main thread) --------------------------
+
+    private val mainHandler = android.os.Handler(android.os.Looper.getMainLooper())
+
+    private fun setClipboard(textValue: String) {
+        runOnMain {
+            val cm = context.getSystemService(Context.CLIPBOARD_SERVICE) as android.content.ClipboardManager
+            cm.setPrimaryClip(android.content.ClipData.newPlainText("mcp", textValue))
+        }
+    }
+
+    private fun getClipboard(): String {
+        var result = ""
+        runOnMain {
+            try {
+                val cm = context.getSystemService(Context.CLIPBOARD_SERVICE) as android.content.ClipboardManager
+                result = cm.primaryClip?.getItemAt(0)?.coerceToText(context)?.toString() ?: ""
+            } catch (_: Exception) {}
+        }
+        return result
+    }
+
+    private fun runOnMain(block: () -> Unit) {
+        if (android.os.Looper.myLooper() == android.os.Looper.getMainLooper()) { block(); return }
+        val latch = java.util.concurrent.CountDownLatch(1)
+        mainHandler.post { try { block() } finally { latch.countDown() } }
+        latch.await(3, java.util.concurrent.TimeUnit.SECONDS)
     }
 
     private fun maybeConfirmAt(svc: ControllerAccessibilityService, action: String, x: Int, y: Int) {
@@ -221,8 +370,15 @@ class McpTools(private val context: Context) {
         "tap", "long_tap" -> "(${a.optInt("x")},${a.optInt("y")})"
         "tap_element" -> "'${a.optString("selector")}'"
         "open_app" -> a.optString("name")
+        "open_url" -> a.optString("url")
+        "open_settings" -> a.optString("target")
         "scroll" -> a.optString("direction")
         "type_text" -> "${a.optString("text").length} chars"
+        "press_key" -> a.optString("key")
+        "wait_for" -> "'${a.optString("selector")}'"
+        "wait" -> "${a.optLong("ms")}ms"
+        "set_volume" -> "${a.optString("stream")}=${a.optInt("percent")}%"
+        "set_brightness" -> "${a.optInt("percent")}%"
         else -> ""
     }
 
@@ -267,4 +423,5 @@ class McpTools(private val context: Context) {
 
     private fun strProp(desc: String) = JSONObject().put("type", "string").put("description", desc)
     private fun intProp(desc: String) = JSONObject().put("type", "integer").put("description", desc)
+    private fun boolProp(desc: String) = JSONObject().put("type", "boolean").put("description", desc)
 }

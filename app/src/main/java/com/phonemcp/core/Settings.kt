@@ -10,6 +10,7 @@ object Settings {
     private const val KEY_DEEPLINKS = "voice_deeplinks"
     private const val KEY_CALL_ON_LAUNCH = "call_on_launch"
     private const val KEY_OVERLAY = "overlay_enabled"
+    private const val KEY_WATCHDOG = "watchdog_enabled"
 
     // No official Claude voice deep link is documented, and guessed schemes like
     // claude://voice "resolve" but open the wrong screen, so by default we skip
@@ -30,6 +31,9 @@ object Settings {
 
     fun overlayEnabled(c: Context): Boolean = prefs(c).getBoolean(KEY_OVERLAY, false)
     fun setOverlayEnabled(c: Context, v: Boolean) = prefs(c).edit().putBoolean(KEY_OVERLAY, v).apply()
+
+    fun watchdogEnabled(c: Context): Boolean = prefs(c).getBoolean(KEY_WATCHDOG, false)
+    fun setWatchdogEnabled(c: Context, v: Boolean) = prefs(c).edit().putBoolean(KEY_WATCHDOG, v).apply()
 
     fun deepLinks(c: Context): List<String> {
         val raw = prefs(c).getString(KEY_DEEPLINKS, null) ?: return DEFAULT_DEEPLINKS

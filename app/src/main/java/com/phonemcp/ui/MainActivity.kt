@@ -215,6 +215,10 @@ class MainActivity : Activity(), AppState.Listener {
             text = "Плавающая кнопка поверх приложений"
             isChecked = Prefs.overlayEnabled(this@MainActivity)
         }
+        val watchdogCb = CheckBox(this).apply {
+            text = "Сторожок включён (сигнал, если Claude замолчал)"
+            isChecked = Prefs.watchdogEnabled(this@MainActivity)
+        }
         val linksLabel = TextView(this).apply { text = "Deep links (по одному на строку):" }
         val links = EditText(this).apply {
             setText(Prefs.deepLinks(this@MainActivity).joinToString("\n"))
@@ -231,7 +235,7 @@ class MainActivity : Activity(), AppState.Listener {
         }
 
         root.addView(timeoutLabel); root.addView(timeout)
-        root.addView(returnCb); root.addView(launchCb); root.addView(overlayCb)
+        root.addView(returnCb); root.addView(launchCb); root.addView(overlayCb); root.addView(watchdogCb)
         root.addView(linksLabel); root.addView(links); root.addView(relearn)
 
         AlertDialog.Builder(this)
@@ -241,6 +245,7 @@ class MainActivity : Activity(), AppState.Listener {
                 Prefs.setSilenceTimeoutSec(this, timeout.text.toString().toIntOrNull() ?: 60)
                 Prefs.setReturnAfterStart(this, returnCb.isChecked)
                 Prefs.setCallClaudeOnLaunch(this, launchCb.isChecked)
+                Prefs.setWatchdogEnabled(this, watchdogCb.isChecked)
                 Prefs.setDeepLinks(this, links.text.toString().split("\n").map { it.trim() }.filter { it.isNotEmpty() })
                 applyOverlaySetting(overlayCb.isChecked)
                 Toast.makeText(this, "Сохранено", Toast.LENGTH_SHORT).show()
