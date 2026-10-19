@@ -22,10 +22,13 @@ class SilenceWatchdog(
     private val intervalMs = 5000L
     @Volatile private var running = false
 
+    // Specific phrases only — bare "limit" matches "unlimited"/"limitations" and
+    // caused false alarms, so require a real quota message.
     private val limitKeywords = listOf(
-        "limit", "message limit", "out of messages", "reached your", "upgrade to",
-        "run out", "usage limit",
-        "лимит", "достигнут лимит", "закончились сообщения", "перейдите на", "превышен"
+        "message limit", "out of messages", "reached your limit", "run out of",
+        "usage limit", "daily limit", "you've hit your limit", "upgrade to claude",
+        "достигнут лимит", "лимит сообщений", "закончились сообщения",
+        "исчерпан лимит", "превышен лимит", "лимит исчерпан"
     )
 
     private val tick = object : Runnable {

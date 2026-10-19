@@ -76,6 +76,7 @@ class McpForegroundService : Service() {
             started = true
             AppState.setStatus("Запуск сервера…")
             startServer()
+            tunnelAttempt = 0
             startTunnel()
             // First update check ~30s after start, then every few hours.
             updateHandler.postDelayed(updateTick, 30_000)
@@ -147,6 +148,8 @@ class McpForegroundService : Service() {
         }
     }
 
+    private var tunnelAttempt = 0
+
     private fun startTunnel() {
         val cf = CloudflaredManager(applicationContext)
         cloudflared = cf
@@ -157,15 +160,27 @@ class McpForegroundService : Service() {
             ToolLog.add("tunnel", "binary not embedded", false)
             return
         }
+        tunnelAttempt++
         cf.start(
             localPort = Config.LOCAL_PORT,
-            onUrl = { base -> onTunnelUp(base) },
-            onLog = { _ -> },
+            onUrl = { base -> tunnelAttempt = 0; onTunnelUp(base) },
+            onLog = { line ->
+                val bad = line.contains("err", true) || line.contains("fail", true) || line.contains("fatal", true)
+                ToolLog.add("cloudflared", line, !bad)
+            },
             onExit = { code ->
                 AppState.setConnectorUrl(null)
-                AppState.setStatus("Туннель завершился (код $code)")
                 ToolLog.add("tunnel", "exited: $code", false)
-                updateNotification("Туннель остановлен", null)
+                // Auto-retry a few times unless we were deliberately stopped.
+                if (!cf.stopped && started && tunnelAttempt < MAX_TUNNEL_ATTEMPTS) {
+                    val delay = 3000L * tunnelAttempt
+                    AppState.setStatus("Туннель упал (код $code). Перезапуск через ${delay / 1000}с… (попытка ${tunnelAttempt + 1}/$MAX_TUNNEL_ATTEMPTS)")
+                    updateNotification("Перезапускаю туннель…", null)
+                    updateHandler.postDelayed({ if (started) startTunnel() }, delay)
+                } else if (!cf.stopped) {
+                    AppState.setStatus("Туннель не поднялся (код $code). Смотри лог ниже; попробуй ещё раз или Termux.")
+                    updateNotification("Туннель не поднялся", null)
+                }
             }
         )
     }
@@ -332,5 +347,6 @@ class McpForegroundService : Service() {
         const val ACTION_SHOW_OVERLAY = "com.phonemcp.SHOW_OVERLAY"
         const val ACTION_HIDE_OVERLAY = "com.phonemcp.HIDE_OVERLAY"
         const val ACTION_UPDATE = "com.phonemcp.UPDATE"
+        private const val MAX_TUNNEL_ATTEMPTS = 5
     }
 }

@@ -11,14 +11,11 @@ object Settings {
     private const val KEY_CALL_ON_LAUNCH = "call_on_launch"
     private const val KEY_OVERLAY = "overlay_enabled"
 
-    // Candidate deep links to try before falling back to an accessibility tap.
-    // No official Claude voice deep link is documented, so these are best-effort
-    // and editable by the user.
-    val DEFAULT_DEEPLINKS = listOf(
-        "claude://voice",
-        "anthropic://voice",
-        "claude://chat?mode=voice"
-    )
+    // No official Claude voice deep link is documented, and guessed schemes like
+    // claude://voice "resolve" but open the wrong screen, so by default we skip
+    // deep links and go straight to launching the app + tapping the voice button.
+    // The user can add a real deep link here if they find one.
+    val DEFAULT_DEEPLINKS = emptyList<String>()
 
     private fun prefs(c: Context) = c.getSharedPreferences(PREFS, Context.MODE_PRIVATE)
 
