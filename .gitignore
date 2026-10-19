@@ -1,0 +1,14 @@
+*.iml
+.gradle/
+local.properties
+.idea/
+.DS_Store
+build/
+captures/
+.externalNativeBuild/
+.cxx/
+*.apk
+*.keystore
+# cloudflared binary is dropped in by the fetch script; keep it out of git
+app/src/main/jniLibs/arm64-v8a/libcloudflared.so
+app/src/main/jniLibs/armeabi-v7a/libcloudflared.so
