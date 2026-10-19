@@ -1,6 +1,3 @@
-import java.io.FileOutputStream
-import java.net.URL
-
 plugins {
     id("com.android.application")
     id("org.jetbrains.kotlin.android")
@@ -95,36 +92,30 @@ android {
 }
 
 // --- Embed cloudflared ----------------------------------------------------
-// Downloads the arm64 cloudflared binary into jniLibs (as libcloudflared.so) at
-// build time if it isn't already there, so the produced APK is self-contained
-// and the phone never has to download anything. Override the version with
-// -PcloudflaredVersion=2024.8.3 ; skip entirely with -PskipCloudflared.
-val cloudflaredVersion = (project.findProperty("cloudflaredVersion") as String?) ?: "latest"
+// The cloudflared binary is COMMITTED at src/main/jniLibs/arm64-v8a/libcloudflared.so.
+// It is a custom GOOS=android + CGO build (see scripts/build-cloudflared-android.sh)
+// that resolves DNS through Android's system resolver. The upstream linux/arm64
+// binary does NOT work on Android (no /etc/resolv.conf -> DNS lookups hit
+// [::1]:53 and fail), so we do NOT download it. This task just verifies the
+// committed binary is present.
 val cloudflaredFile = file("src/main/jniLibs/arm64-v8a/libcloudflared.so")
 
-val fetchCloudflared by tasks.registering {
-    description = "Download cloudflared (arm64) into jniLibs so it ships inside the APK."
-    outputs.file(cloudflaredFile)
+val verifyCloudflared by tasks.registering {
+    description = "Verify the committed Android cloudflared binary is present."
     onlyIf { !project.hasProperty("skipCloudflared") }
     doLast {
-        if (cloudflaredFile.exists() && cloudflaredFile.length() > 1_000_000) {
-            logger.lifecycle("cloudflared already present (${cloudflaredFile.length()} bytes), skipping download")
-            return@doLast
+        if (!cloudflaredFile.exists() || cloudflaredFile.length() < 1_000_000) {
+            throw GradleException(
+                "Missing Android cloudflared binary: $cloudflaredFile\n" +
+                "Rebuild it with scripts/build-cloudflared-android.sh (needs Go + Android NDK), " +
+                "or pass -PskipCloudflared to build without the tunnel (Termux fallback)."
+            )
         }
-        cloudflaredFile.parentFile.mkdirs()
-        val url = if (cloudflaredVersion == "latest")
-            "https://github.com/cloudflare/cloudflared/releases/latest/download/cloudflared-linux-arm64"
-        else
-            "https://github.com/cloudflare/cloudflared/releases/download/$cloudflaredVersion/cloudflared-linux-arm64"
-        logger.lifecycle("Downloading cloudflared: $url")
-        URL(url).openStream().use { input ->
-            FileOutputStream(cloudflaredFile).use { out -> input.copyTo(out) }
-        }
-        logger.lifecycle("cloudflared -> $cloudflaredFile (${cloudflaredFile.length()} bytes)")
+        logger.lifecycle("cloudflared (android) present: ${cloudflaredFile.length()} bytes")
     }
 }
 
-tasks.named("preBuild") { dependsOn(fetchCloudflared) }
+tasks.named("preBuild") { dependsOn(verifyCloudflared) }
 
 dependencies {
     implementation("androidx.core:core-ktx:1.13.1")

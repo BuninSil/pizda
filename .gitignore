@@ -9,6 +9,6 @@ captures/
 .cxx/
 *.apk
 *.keystore
-# cloudflared binary is dropped in by the fetch script; keep it out of git
-app/src/main/jniLibs/arm64-v8a/libcloudflared.so
-app/src/main/jniLibs/armeabi-v7a/libcloudflared.so
+# NOTE: app/src/main/jniLibs/arm64-v8a/libcloudflared.so IS committed now —
+# it's our Android (GOOS=android, CGO) build of cloudflared, which resolves DNS
+# via the system resolver. The upstream linux binary does NOT work on Android.

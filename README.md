@@ -48,14 +48,15 @@ Android-приложение, которое превращает твой те�
 # → app/build/outputs/apk/debug/app-debug.apk
 ```
 
-cloudflared **встраивается автоматически**: перед сборкой Gradle-задача
-`fetchCloudflared` сама качает arm64-бинарник в `jniLibs`, если его там ещё нет.
-Так что APK получается самодостаточным, телефону качать ничего не надо.
+cloudflared уже **встроен в репозиторий** — это наша сборка под Android
+(`GOOS=android` + CGO), которая резолвит DNS через системный резолвер Android.
+Обычный linux-бинарник на Android не работает (нет `/etc/resolv.conf`, DNS летит
+в `[::1]:53` и падает). Файл лежит в
+`app/src/main/jniLibs/arm64-v8a/libcloudflared.so` и просто попадает в APK.
 
-- конкретная версия: `./gradlew assembleDebug -PcloudflaredVersion=2024.8.3`
-- без встраивания (пойдёшь через Termux): `./gradlew assembleDebug -PskipCloudflared`
-- бинарник кешируется в `app/src/main/jniLibs/arm64-v8a/libcloudflared.so`, так
-  что качается один раз.
+- пересобрать бинарник (нужны Go + Android NDK):
+  `ANDROID_NDK_HOME=/path/to/android-ndk-r27c ./scripts/build-cloudflared-android.sh`
+- собрать APK без туннеля (пойдёшь через Termux): `./gradlew assembleDebug -PskipCloudflared`
 
 Если `./gradlew` ругается на отсутствие SDK — создай `local.properties` в корне:
 
@@ -110,21 +111,25 @@ https://random-words-1234.trycloudflare.com/<длинный-токен>/mcp
 
 ## Туннель наружу
 
-### Основной путь: встроенный cloudflared
+### Основной путь: встроенный cloudflared (Android-сборка)
 
-cloudflared — статический Go-бинарник. Он кладётся как `libcloudflared.so` в
-`app/src/main/jniLibs/arm64-v8a/`. Android извлекает нативные библиотеки на диск
-с правом на исполнение, поэтому сервис запускает его как обычный процесс.
+cloudflared кладётся как `libcloudflared.so` в `app/src/main/jniLibs/arm64-v8a/`.
+Android извлекает нативные библиотеки на диск с правом на исполнение, поэтому
+сервис запускает его как обычный процесс. При старте сервиса туннель поднимается
+сам.
 
-Скачивание делает сама сборка (задача `fetchCloudflared`, см. «Сборка APK»).
-Руками класть ничего не нужно. Если хочется вручную — есть скрипт:
+**Важно:** это **наша сборка под Android** (`GOOS=android`, CGO), а не бинарник с
+релизов cloudflared. Причина — DNS: статический linux-бинарник на Android не видит
+`/etc/resolv.conf` и резолвит через `[::1]:53`, где ничего нет, поэтому падает с
+`dial tcp: lookup api.trycloudflare.com on [::1]:53`. Android-сборка с CGO
+резолвит через системный резолвер (bionic) и работает без рута и без Termux.
+
+Пересобрать бинарник (нужны Go и Android NDK):
 
 ```bash
-./scripts/fetch-cloudflared.sh         # последняя версия
-./scripts/fetch-cloudflared.sh 2024.8.3  # конкретная
+ANDROID_NDK_HOME=/path/to/android-ndk-r27c \
+  ./scripts/build-cloudflared-android.sh 2026.10.1
 ```
-
-При старте сервиса туннель поднимется сам.
 
 > Почему `linux/arm64`: это тот же ABI, что и Android arm64-v8a, бинарник
 > статический и запускается. Почти все современные телефоны — arm64.
@@ -325,7 +330,7 @@ app/src/main/java/com/phonemcp/
   service/       McpForegroundService, OverlayManager, ServiceActionReceiver,
                  Config
   ui/            MainActivity, ConfirmationActivity
-scripts/fetch-cloudflared.sh   — качает и кладёт бинарник туннеля
+scripts/build-cloudflared-android.sh — пересборка Android-бинарника cloudflared
 ```
 
 ---

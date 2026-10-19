@@ -89,6 +89,9 @@ class CloudflaredManager(private val context: Context) {
                         // Surface meaningful lines (errors, connection state, the URL)
                         // so the user can diagnose a failing tunnel from the app log.
                         if (isInteresting(line)) onLog(trimLine(line))
+                        if (isDnsFailure(line)) {
+                            onLog("DNS не резолвится из бинарника. Нужна Android-сборка cloudflared (CGO). Если видишь это — бинарник неверный.")
+                        }
                         if (!reported) {
                             val m = urlPattern.matcher(line)
                             if (m.find()) {
@@ -117,6 +120,13 @@ class CloudflaredManager(private val context: Context) {
             l.contains("trycloudflare.com") || l.contains("registered") ||
             l.contains("connection") || l.contains("unregistered") ||
             l.contains("retry") || l.contains("protocol")
+    }
+
+    private fun isDnsFailure(line: String): Boolean {
+        val l = line.lowercase()
+        return l.contains("[::1]:53") || l.contains("127.0.0.1:53") ||
+            l.contains("no such host") || l.contains("server misbehaving") ||
+            (l.contains("lookup") && l.contains("53"))
     }
 
     private fun trimLine(line: String): String =
