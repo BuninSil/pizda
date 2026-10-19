@@ -10,7 +10,9 @@ import android.content.ClipboardManager
 import android.content.Context
 import android.content.Intent
 import android.os.Build
+import android.os.Handler
 import android.os.IBinder
+import android.os.Looper
 import android.speech.tts.TextToSpeech
 import com.phonemcp.R
 import com.phonemcp.core.AppState
@@ -20,6 +22,7 @@ import com.phonemcp.core.ToolLog
 import com.phonemcp.mcp.McpServer
 import com.phonemcp.tunnel.CloudflaredManager
 import com.phonemcp.ui.MainActivity
+import com.phonemcp.update.UpdateManager
 import com.phonemcp.voice.ClaudeLauncher
 import com.phonemcp.voice.SilenceWatchdog
 import com.phonemcp.voice.VoiceSession
@@ -40,6 +43,15 @@ class McpForegroundService : Service() {
     private var ttsReady = false
     private var watchdog: SilenceWatchdog? = null
     private var overlay: OverlayManager? = null
+
+    private val updateHandler = Handler(Looper.getMainLooper())
+    private val updateIntervalMs = 3L * 60 * 60 * 1000 // every 3 hours
+    private val updateTick = object : Runnable {
+        override fun run() {
+            checkForUpdateAsync()
+            updateHandler.postDelayed(this, updateIntervalMs)
+        }
+    }
 
     override fun onBind(intent: Intent?): IBinder? = null
 
@@ -65,6 +77,8 @@ class McpForegroundService : Service() {
             AppState.setStatus("Запуск сервера…")
             startServer()
             startTunnel()
+            // First update check ~30s after start, then every few hours.
+            updateHandler.postDelayed(updateTick, 30_000)
         }
 
         if (Settings.overlayEnabled(applicationContext)) showOverlay()
@@ -73,8 +87,51 @@ class McpForegroundService : Service() {
             ACTION_CALL, ACTION_RESTART -> callClaudeAsync()
             ACTION_SHOW_OVERLAY -> { Settings.setOverlayEnabled(applicationContext, true); showOverlay() }
             ACTION_HIDE_OVERLAY -> { Settings.setOverlayEnabled(applicationContext, false); overlay?.hide() }
+            ACTION_UPDATE -> doUpdateAsync()
         }
         return START_STICKY
+    }
+
+    // --- In-app update ----------------------------------------------------
+
+    private fun checkForUpdateAsync() {
+        Thread {
+            val info = UpdateManager.check() ?: return@Thread
+            ToolLog.add("update", "available: ${info.tag}", true)
+            notifyUpdate(info.tag)
+        }.start()
+    }
+
+    private fun doUpdateAsync() {
+        Thread {
+            val info = UpdateManager.check()
+            if (info == null) {
+                notifySimple("Обновлений нет", "У тебя уже последняя версия.")
+                return@Thread
+            }
+            notifySimple("Скачиваю обновление…", info.tag)
+            val apk = UpdateManager.download(applicationContext, info)
+            if (apk == null) {
+                notifySimple("Не удалось скачать", "Проверь сеть и доступность релиза.")
+                return@Thread
+            }
+            try {
+                UpdateManager.install(applicationContext, apk)
+            } catch (e: Exception) {
+                notifySimple("Не удалось открыть установщик", "Разреши установку из этого источника. ${e.message}")
+            }
+        }.start()
+    }
+
+    private fun notifyUpdate(tag: String) {
+        val n = Notification.Builder(this, Config.ALERT_CHANNEL)
+            .setContentTitle("Есть обновление ($tag)")
+            .setContentText("Нажми «Обновить», чтобы скачать и установить.")
+            .setSmallIcon(R.drawable.ic_notification)
+            .setAutoCancel(true)
+            .addAction(Notification.Action.Builder(null, "Обновить", pendingService(ACTION_UPDATE, 5)).build())
+            .build()
+        getSystemService(NotificationManager::class.java).notify(Config.UPDATE_ID, n)
     }
 
     private fun startServer() {
@@ -255,6 +312,7 @@ class McpForegroundService : Service() {
     override fun onDestroy() {
         watchdog?.stop()
         overlay?.hide()
+        updateHandler.removeCallbacks(updateTick)
         VoiceSession.end()
         server?.stop()
         cloudflared?.stop()
@@ -273,5 +331,6 @@ class McpForegroundService : Service() {
         const val ACTION_RESTART = "com.phonemcp.RESTART_CALL"
         const val ACTION_SHOW_OVERLAY = "com.phonemcp.SHOW_OVERLAY"
         const val ACTION_HIDE_OVERLAY = "com.phonemcp.HIDE_OVERLAY"
+        const val ACTION_UPDATE = "com.phonemcp.UPDATE"
     }
 }

@@ -26,6 +26,7 @@ import com.phonemcp.core.Settings as Prefs
 import com.phonemcp.core.TokenManager
 import com.phonemcp.core.ToolLog
 import com.phonemcp.service.McpForegroundService
+import com.phonemcp.update.UpdateManager
 import com.phonemcp.voice.VoiceButtonMemory
 
 class MainActivity : Activity(), AppState.Listener {
@@ -58,6 +59,8 @@ class MainActivity : Activity(), AppState.Listener {
         findViewById<Button>(R.id.blacklistButton).setOnClickListener { editBlacklist() }
         findViewById<Button>(R.id.callClaudeButton).setOnClickListener { callClaude() }
         findViewById<Button>(R.id.voiceSettingsButton).setOnClickListener { voiceSettings() }
+        findViewById<Button>(R.id.updateButton).setOnClickListener { checkUpdates(manual = true) }
+        findViewById<TextView>(R.id.versionText).text = "Версия: ${UpdateManager.currentVersionLabel()}"
 
         requestNotificationPermissionIfNeeded()
 
@@ -65,6 +68,35 @@ class MainActivity : Activity(), AppState.Listener {
         if (Prefs.callClaudeOnLaunch(this)) {
             callClaude()
         }
+
+        // Check for updates on launch (silent if none).
+        checkUpdates(manual = false)
+    }
+
+    private fun checkUpdates(manual: Boolean) {
+        if (manual) Toast.makeText(this, "Проверяю обновления…", Toast.LENGTH_SHORT).show()
+        Thread {
+            val info = UpdateManager.check()
+            runOnUiThread {
+                if (isFinishing) return@runOnUiThread
+                if (info == null) {
+                    if (manual) Toast.makeText(this, "У тебя последняя версия", Toast.LENGTH_SHORT).show()
+                    return@runOnUiThread
+                }
+                AlertDialog.Builder(this)
+                    .setTitle("Есть обновление (${info.tag})")
+                    .setMessage(info.notes.ifBlank { "Доступна новая версия. Обновить сейчас?" })
+                    .setPositiveButton("Обновить") { _, _ ->
+                        val intent = Intent(this, McpForegroundService::class.java)
+                            .setAction(McpForegroundService.ACTION_UPDATE)
+                        if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.O) startForegroundService(intent)
+                        else startService(intent)
+                        Toast.makeText(this, "Скачиваю и открою установщик…", Toast.LENGTH_LONG).show()
+                    }
+                    .setNegativeButton("Позже", null)
+                    .show()
+            }
+        }.start()
     }
 
     override fun onResume() {

@@ -32,6 +32,8 @@ Android-приложение, которое превращает твой те�
   голосовым оповещением (TTS).
 - **Безопасность**: чёрный список приложений, подтверждения на экране,
   предупреждения о недоверенных данных, главный выключатель, лог вызовов.
+- **CI + автообновление**: GitHub Actions собирает подписанный APK на каждый push
+  в `main` и кладёт в Releases; приложение само проверяет и ставит обновления.
 
 ---
 
@@ -42,13 +44,18 @@ Android-приложение, которое превращает твой те�
 ### Вариант 1. Через Gradle (CLI)
 
 ```bash
-# 1) положи бинарник cloudflared внутрь APK (см. раздел «Туннель» ниже)
-./scripts/fetch-cloudflared.sh
-
-# 2) собери debug APK
 ./gradlew assembleDebug
 # → app/build/outputs/apk/debug/app-debug.apk
 ```
+
+cloudflared **встраивается автоматически**: перед сборкой Gradle-задача
+`fetchCloudflared` сама качает arm64-бинарник в `jniLibs`, если его там ещё нет.
+Так что APK получается самодостаточным, телефону качать ничего не надо.
+
+- конкретная версия: `./gradlew assembleDebug -PcloudflaredVersion=2024.8.3`
+- без встраивания (пойдёшь через Termux): `./gradlew assembleDebug -PskipCloudflared`
+- бинарник кешируется в `app/src/main/jniLibs/arm64-v8a/libcloudflared.so`, так
+  что качается один раз.
 
 Если `./gradlew` ругается на отсутствие SDK — создай `local.properties` в корне:
 
@@ -105,17 +112,19 @@ https://random-words-1234.trycloudflare.com/<длинный-токен>/mcp
 
 ### Основной путь: встроенный cloudflared
 
-cloudflared — статический Go-бинарник. Кладём его как `libcloudflared.so` в
+cloudflared — статический Go-бинарник. Он кладётся как `libcloudflared.so` в
 `app/src/main/jniLibs/arm64-v8a/`. Android извлекает нативные библиотеки на диск
 с правом на исполнение, поэтому сервис запускает его как обычный процесс.
 
+Скачивание делает сама сборка (задача `fetchCloudflared`, см. «Сборка APK»).
+Руками класть ничего не нужно. Если хочется вручную — есть скрипт:
+
 ```bash
 ./scripts/fetch-cloudflared.sh         # последняя версия
-# или конкретная:
-./scripts/fetch-cloudflared.sh 2024.8.3
+./scripts/fetch-cloudflared.sh 2024.8.3  # конкретная
 ```
 
-После этого собирай APK. При старте сервиса туннель поднимется сам.
+При старте сервиса туннель поднимется сам.
 
 > Почему `linux/arm64`: это тот же ABI, что и Android arm64-v8a, бинарник
 > статический и запускается. Почти все современные телефоны — arm64.
@@ -200,6 +209,106 @@ cloudflared напечатает строку вида `https://xxxx.trycloudfla
 
 ---
 
+## Автосборка и релизы (GitHub Actions)
+
+В `.github/workflows/release.yml` настроено: **на каждый push в `main`** —
+собрать подписанный release-APK с увеличенным `versionCode` и выложить его в
+**GitHub Releases**.
+
+- `versionCode` = номер запуска воркфлоу (`github.run_number`) → каждая сборка
+  выше предыдущей.
+- тег релиза: `v<versionCode>` (например `v42`). По нему же приложение понимает,
+  что вышла новая версия.
+- APK в релизе всегда называется `phone-mcp.apk`, поэтому есть **постоянная
+  прямая ссылка на последний APK**:
+
+```
+https://github.com/BuninSil/pizda/releases/latest/download/phone-mcp.apk
+```
+
+Открываешь её на телефоне → качается свежий APK. (Работает только если репозиторий
+публичный — см. «Приватный репозиторий» ниже.)
+
+> Я разрабатываю в ветке `ccr-...`. Воркфлоу срабатывает на `main` — слей туда
+> ветку (или смерджи PR), и сборка поедет.
+
+## Подпись (release-ключ)
+
+Чтобы обновления ставились **поверх старой версии** без удаления, все сборки
+должны быть подписаны **одним и тем же** постоянным ключом. Ключ генеришь ты сам
+(я не могу безопасно сгенерировать и показать приватный ключ в чате — если лог
+утечёт, утечёт ключ) и кладёшь в GitHub Secrets.
+
+### 1. Сгенерируй keystore (один раз, у себя):
+
+```bash
+keytool -genkeypair -v \
+  -keystore release.jks -storetype PKCS12 \
+  -keyalg RSA -keysize 2048 -validity 10000 \
+  -alias phonemcp \
+  -dname "CN=Phone MCP, O=PhoneMCP, C=US"
+# задай и запомни пароль (store и key пароль для PKCS12 должны совпадать)
+```
+
+### 2. Получи base64 keystore:
+
+```bash
+base64 -w0 release.jks   # Linux
+# base64 -i release.jks  # macOS
+```
+
+### 3. Добавь секреты в репозиторий
+
+`Settings → Secrets and variables → Actions → New repository secret`:
+
+| Secret | Значение |
+|---|---|
+| `KEYSTORE_BASE64` | строка из шага 2 |
+| `KEYSTORE_PASSWORD` | пароль keystore |
+| `KEY_ALIAS` | `phonemcp` |
+| `KEY_PASSWORD` | тот же пароль |
+
+Храни `release.jks` и пароль в надёжном месте — **потерял ключ = не сможешь
+выпускать обновления** поверх уже установленной версии (только переустановка).
+
+> Без этих секретов воркфлоу упадёт с понятной ошибкой. Локально release без
+> секретов собирается на debug-ключе (для теста), но таким APK обновляться
+> поверх прод-версии нельзя.
+
+## Автообновление внутри приложения
+
+- Проверка при запуске приложения и раз в несколько часов (пока работает сервис).
+- Берёт последний релиз через GitHub API
+  (`/repos/<repo>/releases/latest`), сравнивает `versionCode` из тега с текущим.
+- Если новее — уведомление **«Есть обновление»** с кнопкой **«Обновить»** (и
+  диалог при запуске). По кнопке качает `phone-mcp.apk` и открывает системный
+  установщик (`REQUEST_INSTALL_PACKAGES` + `FileProvider`).
+- В приложении: кнопка **«Проверить обновления»** и строка с текущей версией.
+- Репозиторий для проверки задаётся в `BuildConfig.UPDATE_REPO` (по умолчанию
+  `BuninSil/pizda`); поменять без правки кода: `-PupdateRepo=owner/name` при сборке.
+
+> Первый раз Android попросит разрешить установку из этого приложения
+> («Установка неизвестных приложений») — это нормально, разреши.
+
+## Приватный репозиторий
+
+Автообновление и прямая ссылка работают **без токена только для публичного
+репозитория** (в приложение намеренно не зашит GitHub-токен — это небезопасно).
+Если `pizda` приватный, есть два пути:
+
+1. **Сделать `pizda` публичным** — проще всего. Код и так твой личный тулинг.
+2. **Отдельный публичный репозиторий только для релизов** (напр.
+   `pizda-releases`): основной код остаётся приватным, а воркфлоу публикует APK в
+   публичный репо. Для этого:
+   - создай публичный `pizda-releases`;
+   - в `release.yml` у `softprops/action-gh-release` добавь
+     `repository: BuninSil/pizda-releases` и `token: ${{ secrets.RELEASES_TOKEN }}`
+     (PAT с правом `contents:write` на тот репо);
+   - собери приложение с `-PupdateRepo=BuninSil/pizda-releases` (или поменяй
+     дефолт в `build.gradle.kts`);
+   - прямая ссылка станет
+     `https://github.com/BuninSil/pizda-releases/releases/latest/download/phone-mcp.apk`.
+
 ## Структура проекта
 
 ```
@@ -212,6 +321,7 @@ app/src/main/java/com/phonemcp/
   tunnel/        CloudflaredManager
   voice/         ClaudeLauncher, SilenceWatchdog, VoiceSession,
                  VoiceButtonMemory
+  update/        UpdateManager (проверка/скачивание/установка релизов)
   service/       McpForegroundService, OverlayManager, ServiceActionReceiver,
                  Config
   ui/            MainActivity, ConfirmationActivity
