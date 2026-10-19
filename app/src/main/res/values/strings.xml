@@ -1,0 +1,5 @@
+<resources>
+    <string name="app_name">Phone MCP</string>
+    <string name="accessibility_label">Phone MCP Controller</string>
+    <string name="accessibility_description">Lets the Phone MCP app read the current screen and perform taps, swipes and text input so you can control this phone remotely through Claude. Screen content is treated as untrusted data. Only enable this if you understand what it does.</string>
+</resources>
