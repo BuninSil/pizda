@@ -37,30 +37,40 @@ android {
     }
 
     // --- Signing ----------------------------------------------------------
-    // Release is signed with a stable keystore supplied via env (GitHub Secrets),
-    // so updates install over previous versions. Without it (local dev) we fall
-    // back to the debug keystore so the build still works.
+    // One stable identity signs EVERY build (debug and release, local and CI), so
+    // each new APK installs over the previous one without uninstalling.
+    //  - If GitHub Secrets provide a keystore (KEYSTORE_FILE + passwords), use it.
+    //  - Otherwise use the shared keystore committed at keystore/debug-shared.jks
+    //    (well-known password "android"). It's an intentionally public debug key,
+    //    fine for a personal tool; swap in a real release key later via Secrets.
     signingConfigs {
-        val ksPath = System.getenv("KEYSTORE_FILE")
-        if (ksPath != null && file(ksPath).exists()) {
-            create("release") {
-                storeFile = file(ksPath)
+        create("shared") {
+            val envKs = System.getenv("KEYSTORE_FILE")
+            if (envKs != null && file(envKs).exists()) {
+                storeFile = file(envKs)
                 storePassword = System.getenv("KEYSTORE_PASSWORD")
                 keyAlias = System.getenv("KEY_ALIAS")
                 keyPassword = System.getenv("KEY_PASSWORD")
+            } else {
+                storeFile = rootProject.file("keystore/debug-shared.jks")
+                storePassword = "android"
+                keyAlias = "androiddebugkey"
+                keyPassword = "android"
             }
         }
     }
 
     buildTypes {
+        debug {
+            signingConfig = signingConfigs.getByName("shared")
+        }
         release {
             isMinifyEnabled = false
             proguardFiles(
                 getDefaultProguardFile("proguard-android-optimize.txt"),
                 "proguard-rules.pro"
             )
-            signingConfig = signingConfigs.findByName("release")
-                ?: signingConfigs.getByName("debug")
+            signingConfig = signingConfigs.getByName("shared")
         }
     }
 
