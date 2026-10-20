@@ -4,6 +4,7 @@ import android.content.Context
 import com.phonemcp.accessibility.ControllerAccessibilityService
 import com.phonemcp.core.Blacklist
 import com.phonemcp.core.ConfirmationManager
+import com.phonemcp.core.Settings
 import com.phonemcp.core.ToolLog
 import org.json.JSONArray
 import org.json.JSONObject
@@ -93,8 +94,8 @@ class McpTools(private val context: Context) {
 
         tools.put(tool(
             "press_key",
-            "Press a key in the focused field: \"enter\", \"backspace\" or \"delete\". In messengers, " +
-                "enter counts as SEND and requires on-device confirmation.",
+            "Press a key in the focused field: \"enter\", \"backspace\" or \"delete\". In messengers " +
+                "enter counts as SEND — confirm it with the user by voice before calling.",
             obj("key" to strProp("enter | backspace | delete")),
             listOf("key")
         ))
@@ -202,6 +203,18 @@ class McpTools(private val context: Context) {
         if (!ok) throw ConfirmationRequired("пользователь не подтвердил на телефоне (или таймаут)")
     }
 
+    /**
+     * Confirm by tier: purchases/transfers/banking/calls/deletion ALWAYS prompt
+     * on-device; message-sends prompt only if the "confirm sends on device"
+     * setting is on (default off — sends are confirmed by voice via Claude).
+     */
+    private fun confirmIfSensitive(action: String, label: String?) {
+        Sensitivity.alwaysReason(label)?.let { requireConfirm(action, it); return }
+        if (Settings.confirmSendsOnDevice(context)) {
+            Sensitivity.sendReason(label)?.let { requireConfirm(action, it) }
+        }
+    }
+
     private fun dispatch(name: String, a: JSONObject): JSONObject {
         val svc = service()
         checkBlacklist(svc)
@@ -225,7 +238,7 @@ class McpTools(private val context: Context) {
 
             "tap_element" -> {
                 val sel = a.getString("selector")
-                Sensitivity.reasonFor(sel)?.let { requireConfirm("нажать на «$sel»", it) }
+                confirmIfSensitive("нажать на «$sel»", sel)
                 maybeConfirmSettings(svc, "нажать на «$sel»")
                 ok(svc.tapElement(sel), "tap_element '$sel'")
             }
@@ -245,7 +258,7 @@ class McpTools(private val context: Context) {
             "type_text" -> {
                 val t = a.getString("text")
                 val replace = a.optBoolean("replace", false)
-                Sensitivity.reasonFor(t)?.let { requireConfirm("ввести текст", it) }
+                confirmIfSensitive("ввести текст", t)
                 ok(svc.typeText(t, replace), "type_text (${t.length} chars${if (replace) ", replace" else ""})")
             }
 
@@ -254,7 +267,10 @@ class McpTools(private val context: Context) {
             "press_key" -> {
                 when (a.getString("key").lowercase()) {
                     "enter" -> {
-                        if (Sensitivity.isMessenger(svc.activePackage())) {
+                        // Enter in a messenger = send. Confirm on-device only if the
+                        // owner opted in; otherwise it's confirmed by voice via Claude.
+                        if (Sensitivity.isMessenger(svc.activePackage()) &&
+                            Settings.confirmSendsOnDevice(context)) {
                             requireConfirm("нажать Enter (отправка сообщения)", "мессенджер: ${svc.activePackage()}")
                         }
                         ok(svc.pressEnter(), "press_key enter")
@@ -356,7 +372,7 @@ class McpTools(private val context: Context) {
 
     private fun maybeConfirmAt(svc: ControllerAccessibilityService, action: String, x: Int, y: Int) {
         val label = svc.nodeTextAt(x, y)
-        Sensitivity.reasonFor(label)?.let { requireConfirm(action, "$it ($label)") }
+        confirmIfSensitive(action, label)
         maybeConfirmSettings(svc, action)
     }
 

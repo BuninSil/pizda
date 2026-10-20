@@ -219,6 +219,10 @@ class MainActivity : Activity(), AppState.Listener {
             text = "Сторожок включён (сигнал, если Claude замолчал)"
             isChecked = Prefs.watchdogEnabled(this@MainActivity)
         }
+        val confirmSendsCb = CheckBox(this).apply {
+            text = "Подтверждать отправки на телефоне (покупки/переводы/банк — всегда)"
+            isChecked = Prefs.confirmSendsOnDevice(this@MainActivity)
+        }
         val linksLabel = TextView(this).apply { text = "Deep links (по одному на строку):" }
         val links = EditText(this).apply {
             setText(Prefs.deepLinks(this@MainActivity).joinToString("\n"))
@@ -236,6 +240,7 @@ class MainActivity : Activity(), AppState.Listener {
 
         root.addView(timeoutLabel); root.addView(timeout)
         root.addView(returnCb); root.addView(launchCb); root.addView(overlayCb); root.addView(watchdogCb)
+        root.addView(confirmSendsCb)
         root.addView(linksLabel); root.addView(links); root.addView(relearn)
 
         AlertDialog.Builder(this)
@@ -246,6 +251,7 @@ class MainActivity : Activity(), AppState.Listener {
                 Prefs.setReturnAfterStart(this, returnCb.isChecked)
                 Prefs.setCallClaudeOnLaunch(this, launchCb.isChecked)
                 Prefs.setWatchdogEnabled(this, watchdogCb.isChecked)
+                Prefs.setConfirmSendsOnDevice(this, confirmSendsCb.isChecked)
                 Prefs.setDeepLinks(this, links.text.toString().split("\n").map { it.trim() }.filter { it.isNotEmpty() })
                 applyOverlaySetting(overlayCb.isChecked)
                 Toast.makeText(this, "Сохранено", Toast.LENGTH_SHORT).show()

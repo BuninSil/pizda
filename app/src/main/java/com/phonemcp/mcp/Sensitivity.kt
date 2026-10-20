@@ -1,31 +1,48 @@
 package com.phonemcp.mcp
 
 /**
- * Hard-coded detection of actions that must be confirmed on the device:
- * sending messages, calls, purchases, deletion, and system-settings changes.
+ * Hard-coded detection of sensitive actions, split into two tiers:
+ *
+ *  - SEND: sending/replying to messages. Confirmation for these is OPTIONAL
+ *    (off by default) because the owner now confirms by voice through Claude.
+ *  - ALWAYS: purchases, transfers, banking, calls, deletion, resets — these
+ *    ALWAYS require on-device confirmation regardless of the setting.
+ *
  * Matches labels on the element being tapped (RU + EN).
  */
 object Sensitivity {
 
-    private val KEYWORDS = listOf(
-        // send
-        "отправить", "послать", "send", "reply", "ответить",
-        // call
+    // Message-send actions — gated by the "confirm sends on device" setting.
+    private val SEND_KEYWORDS = listOf(
+        "отправить", "отправка", "послать", "send", "reply", "ответить"
+    )
+
+    // Always-confirm actions: money, banking, calls, destructive ops.
+    private val ALWAYS_KEYWORDS = listOf(
+        // calls
         "позвонить", "вызов", "call", "dial", "набрать",
         // purchase / pay
         "купить", "оплатить", "оплата", "платёж", "платеж", "подтвердить заказ",
         "buy", "pay", "purchase", "checkout", "order", "subscribe", "подписаться",
+        // transfers / banking
+        "перевод", "перевести", "перечислить", "transfer", "remittance",
+        "банк", "bank", "реквизиты", "card number", "iban",
         // delete / remove
         "удалить", "удаление", "стереть", "delete", "remove", "erase", "wipe",
-        // confirm/destructive
-        "подтвердить", "confirm", "сбросить", "reset", "форматировать", "format"
+        // destructive
+        "сбросить", "reset", "форматировать", "format"
     )
 
-    /** @return a short reason string if the label looks sensitive, else null. */
-    fun reasonFor(label: String?): String? {
+    /** @return reason if the label is an ALWAYS-confirm action, else null. */
+    fun alwaysReason(label: String?): String? = match(label, ALWAYS_KEYWORDS)
+
+    /** @return reason if the label is a message-send action, else null. */
+    fun sendReason(label: String?): String? = match(label, SEND_KEYWORDS)
+
+    private fun match(label: String?, keywords: List<String>): String? {
         if (label.isNullOrBlank()) return null
         val l = label.lowercase()
-        val hit = KEYWORDS.firstOrNull { l.contains(it) } ?: return null
+        val hit = keywords.firstOrNull { l.contains(it) } ?: return null
         return "элемент содержит «$hit»"
     }
 

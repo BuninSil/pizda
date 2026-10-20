@@ -11,6 +11,7 @@ object Settings {
     private const val KEY_CALL_ON_LAUNCH = "call_on_launch"
     private const val KEY_OVERLAY = "overlay_enabled"
     private const val KEY_WATCHDOG = "watchdog_enabled"
+    private const val KEY_CONFIRM_SENDS = "confirm_sends_on_device"
 
     // No official Claude voice deep link is documented, and guessed schemes like
     // claude://voice "resolve" but open the wrong screen, so by default we skip
@@ -34,6 +35,11 @@ object Settings {
 
     fun watchdogEnabled(c: Context): Boolean = prefs(c).getBoolean(KEY_WATCHDOG, false)
     fun setWatchdogEnabled(c: Context, v: Boolean) = prefs(c).edit().putBoolean(KEY_WATCHDOG, v).apply()
+
+    // Confirm message-sends on the device. Off by default — sends are confirmed
+    // by voice through Claude; purchases/transfers/banking confirm regardless.
+    fun confirmSendsOnDevice(c: Context): Boolean = prefs(c).getBoolean(KEY_CONFIRM_SENDS, false)
+    fun setConfirmSendsOnDevice(c: Context, v: Boolean) = prefs(c).edit().putBoolean(KEY_CONFIRM_SENDS, v).apply()
 
     fun deepLinks(c: Context): List<String> {
         val raw = prefs(c).getString(KEY_DEEPLINKS, null) ?: return DEFAULT_DEEPLINKS
