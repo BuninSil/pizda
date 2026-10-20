@@ -1,0 +1,19 @@
+# Deploy the stable-URL proxy from a computer:
+#
+#   cd worker
+#   npm i -g wrangler
+#   wrangler login
+#   wrangler kv namespace create KV      # prints an id — paste it below as `id =`
+#   wrangler deploy
+#   # optional: wrangler secret put UPDATE_SECRET   (then put the same value in the app)
+#
+# Your Worker URL will be printed by `wrangler deploy`
+# (https://phone-mcp.<your-subdomain>.workers.dev).
+
+name = "phone-mcp"
+main = "phone-mcp-worker.js"
+compatibility_date = "2024-09-01"
+
+[[kv_namespaces]]
+binding = "KV"
+id = "PASTE_KV_NAMESPACE_ID_HERE"

@@ -33,15 +33,18 @@ export default {
     // --- Control: update the current backend tunnel URL ---
     if (url.pathname === "/__set") {
       if (request.method !== "POST") return new Response("POST only", { status: 405 });
+      // UPDATE_SECRET is OPTIONAL. If you set it (Worker → Settings → Variables),
+      // the phone must send the same value; if you don't, updates are open (only
+      // a *.trycloudflare.com backend is accepted, so the blast radius is small).
       const secret = request.headers.get("x-update-secret") || "";
-      if (!env.UPDATE_SECRET || secret !== env.UPDATE_SECRET) {
+      if (env.UPDATE_SECRET && secret !== env.UPDATE_SECRET) {
         return new Response("forbidden", { status: 403 });
       }
       let body;
       try { body = await request.json(); } catch { return new Response("bad json", { status: 400 }); }
       const backend = String(body.url || "").trim().replace(/\/+$/, "");
-      if (!/^https:\/\/[a-z0-9.-]+$/i.test(backend)) {
-        return new Response("bad url", { status: 400 });
+      if (!/^https:\/\/[a-z0-9-]+\.trycloudflare\.com$/i.test(backend)) {
+        return new Response("bad url (ожидается https://xxx.trycloudflare.com)", { status: 400 });
       }
       await env.KV.put("backend", backend);
       return new Response("ok " + backend);
