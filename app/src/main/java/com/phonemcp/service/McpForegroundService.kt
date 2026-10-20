@@ -111,10 +111,12 @@ class McpForegroundService : Service() {
                 is UpdateManager.Outcome.Failed -> { notifySimple("Не удалось проверить", o.reason); return@Thread }
             }
             notifySimple("Скачиваю обновление…", info.tag)
-            val apk = UpdateManager.download(applicationContext, info)
-            if (apk == null) {
-                notifySimple("Не удалось скачать", "Проверь сеть и доступность релиза.")
-                return@Thread
+            val apk = when (val dl = UpdateManager.download(applicationContext, info)) {
+                is UpdateManager.DownloadResult.Ok -> dl.file
+                is UpdateManager.DownloadResult.Err -> {
+                    notifySimple("Не удалось скачать обновление", "${dl.reason}. Можно поставить вручную по ссылке из релизов.")
+                    return@Thread
+                }
             }
             try {
                 UpdateManager.install(applicationContext, apk)

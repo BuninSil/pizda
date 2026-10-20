@@ -89,14 +89,16 @@ class CloudflaredManager(private val context: Context) {
                         // Surface meaningful lines (errors, connection state, the URL)
                         // so the user can diagnose a failing tunnel from the app log.
                         if (isInteresting(line)) onLog(trimLine(line))
-                        if (isDnsFailure(line)) {
-                            onLog("DNS не резолвится из бинарника. Нужна Android-сборка cloudflared (CGO). Если видишь это — бинарник неверный.")
-                        }
                         if (!reported) {
                             val m = urlPattern.matcher(line)
                             if (m.find()) {
                                 reported = true
                                 onUrl(m.group())
+                            } else if (isDnsFailure(line)) {
+                                // Only a real problem if we never get a tunnel URL. cloudflared
+                                // also does non-fatal feature lookups (cfd-features.argotunnel.com)
+                                // that can fail via [::1]:53 while the tunnel comes up fine.
+                                onLog("note: DNS lookup via [::1]:53 failed (ок, если туннель всё равно поднялся).")
                             }
                         }
                         line = reader.readLine()

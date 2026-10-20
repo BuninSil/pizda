@@ -22,7 +22,19 @@ import java.net.URL
  */
 object UpdateManager {
 
-    data class UpdateInfo(val versionCode: Int, val tag: String, val apkUrl: String, val notes: String)
+    data class UpdateInfo(
+        val versionCode: Int,
+        val tag: String,
+        val apkUrl: String,
+        val notes: String,
+        val size: Long,
+        val sha256: String?
+    )
+
+    sealed class DownloadResult {
+        data class Ok(val file: File) : DownloadResult()
+        data class Err(val reason: String) : DownloadResult()
+    }
 
     /** Explicit outcome so the UI never confuses "up to date" with "check failed". */
     sealed class Outcome {
@@ -55,34 +67,55 @@ object UpdateManager {
 
             val assets = obj.optJSONArray("assets")
             var apkUrl: String? = null
+            var size = 0L
+            var sha256: String? = null
             if (assets != null) {
                 for (i in 0 until assets.length()) {
                     val a = assets.getJSONObject(i)
                     if (a.optString("name").endsWith(".apk")) {
                         apkUrl = a.optString("browser_download_url")
+                        size = a.optLong("size", 0)
+                        a.optString("digest").takeIf { it.startsWith("sha256:") }
+                            ?.let { sha256 = it.removePrefix("sha256:").lowercase() }
                         break
                     }
                 }
             }
             if (apkUrl.isNullOrBlank()) return Outcome.Failed("в релизе $tag нет .apk")
-            Outcome.Available(UpdateInfo(latestCode, tag, apkUrl, obj.optString("body").take(500)))
+            Outcome.Available(UpdateInfo(latestCode, tag, apkUrl, obj.optString("body").take(500), size, sha256))
         } catch (e: Exception) {
             ToolLog.add("update", "check failed: ${e.message}", false)
             Outcome.Failed(e.message ?: "ошибка проверки")
         }
     }
 
-    /** Blocking download of the APK into cacheDir/updates. */
-    fun download(context: Context, info: UpdateInfo): File? {
-        return try {
-            val dir = File(context.cacheDir, "updates").apply { mkdirs() }
-            // Clean old files.
-            dir.listFiles()?.forEach { it.delete() }
-            val out = File(dir, "phone-mcp-${info.versionCode}.apk")
+    /**
+     * Blocking download of the APK into cacheDir/updates, with integrity checks
+     * (full size + sha256 + ZIP magic) and retries — so a truncated file from a
+     * flaky mobile connection never reaches the installer as a corrupt package.
+     */
+    fun download(context: Context, info: UpdateInfo): DownloadResult {
+        val dir = File(context.cacheDir, "updates").apply { mkdirs() }
+        dir.listFiles()?.forEach { it.delete() }
+        val out = File(dir, "phone-mcp-${info.versionCode}.apk")
 
+        var lastErr = "не удалось скачать"
+        repeat(3) { attempt ->
+            val res = downloadOnce(info, out)
+            if (res == null) return DownloadResult.Ok(out)
+            lastErr = res
+            ToolLog.add("update", "download attempt ${attempt + 1} failed: $res", false)
+            try { Thread.sleep(1500L * (attempt + 1)) } catch (_: InterruptedException) {}
+        }
+        return DownloadResult.Err(lastErr)
+    }
+
+    /** @return null on success, or an error reason. */
+    private fun downloadOnce(info: UpdateInfo, out: File): String? {
+        return try {
             var url = info.apkUrl
             var redirects = 0
-            while (redirects < 5) {
+            while (redirects < 6) {
                 val conn = (URL(url).openConnection() as HttpURLConnection).apply {
                     instanceFollowRedirects = false
                     connectTimeout = 20000
@@ -92,20 +125,43 @@ object UpdateManager {
                 }
                 val code = conn.responseCode
                 if (code in 300..399) {
-                    url = conn.getHeaderField("Location") ?: return null
-                    conn.disconnect()
-                    redirects++
-                    continue
+                    url = conn.getHeaderField("Location") ?: return "редирект без Location"
+                    conn.disconnect(); redirects++; continue
                 }
-                if (code != 200) { conn.disconnect(); return null }
-                conn.inputStream.use { input -> out.outputStream().use { input.copyTo(it) } }
+                if (code != 200) { conn.disconnect(); return "HTTP $code" }
+
+                val digest = java.security.MessageDigest.getInstance("SHA-256")
+                var total = 0L
+                conn.inputStream.use { input ->
+                    out.outputStream().use { o ->
+                        val buf = ByteArray(64 * 1024)
+                        while (true) {
+                            val n = input.read(buf)
+                            if (n < 0) break
+                            o.write(buf, 0, n); digest.update(buf, 0, n); total += n
+                        }
+                    }
+                }
                 conn.disconnect()
-                return out
+
+                // Integrity: full size, ZIP magic, sha256.
+                if (info.size > 0 && total != info.size) {
+                    return "скачано $total из ${info.size} байт (обрыв связи)"
+                }
+                val head = ByteArray(2)
+                out.inputStream().use { it.read(head) }
+                if (head[0].toInt() != 'P'.code || head[1].toInt() != 'K'.code) {
+                    return "файл не похож на APK"
+                }
+                if (info.sha256 != null) {
+                    val hex = digest.digest().joinToString("") { "%02x".format(it) }
+                    if (!hex.equals(info.sha256, ignoreCase = true)) return "контрольная сумма не совпала (повреждён)"
+                }
+                return null
             }
-            null
+            "слишком много редиректов"
         } catch (e: Exception) {
-            ToolLog.add("update", "download failed: ${e.message}", false)
-            null
+            e.message ?: "ошибка сети"
         }
     }
 
