@@ -63,10 +63,11 @@ class CloudflaredManager(private val context: Context) {
             "--loglevel", "info"
         )
         // Pin the edge to real IPs resolved via DoH, so a fake-IP VPN can't point
-        // cloudflared at a dead 198.18.x.x address.
-        if (edgeIps.isNotEmpty()) {
+        // cloudflared at a dead 198.18.x.x address. Each IP must be its OWN --edge
+        // flag; a single comma-joined value is parsed as one (invalid) address.
+        for (ip in edgeIps.take(8)) {
             args.add("--edge")
-            args.add(edgeIps.joinToString(",") { "$it:7844" })
+            args.add("$ip:7844")
         }
         args.add("--url"); args.add("http://127.0.0.1:$localPort")
         val pb = ProcessBuilder(args)
