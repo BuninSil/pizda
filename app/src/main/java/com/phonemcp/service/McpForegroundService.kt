@@ -173,8 +173,15 @@ class McpForegroundService : Service() {
     }
 
     private var tunnelAttempt = 0
+    @Volatile private var tunnelBusy = false
 
     private fun startTunnel() {
+        // Only one tunnel at a time — exit-retry and the network callback can both
+        // fire; without this they spawn several cloudflared processes at once.
+        if (tunnelBusy) return
+        tunnelBusy = true
+        // Kill any previous process before launching a fresh one.
+        cloudflared?.stop()
         val cf = CloudflaredManager(applicationContext)
         cloudflared = cf
         if (!cf.isEmbedded()) {
@@ -182,6 +189,7 @@ class McpForegroundService : Service() {
                 "cloudflared не встроен. Используй Termux (см. README) или запусти туннель на порт ${Config.LOCAL_PORT}."
             )
             ToolLog.add("tunnel", "binary not embedded", false)
+            tunnelBusy = false
             return
         }
         tunnelAttempt++
@@ -190,6 +198,7 @@ class McpForegroundService : Service() {
             val edgeIps = try { DohResolver.edgeIps() } catch (e: Exception) { emptyList() }
             ToolLog.add("tunnel", "edge ips: ${edgeIps.take(3).joinToString(",")}…", true)
             startTunnelWith(cf, edgeIps)
+            tunnelBusy = false
         }.start()
     }
 
