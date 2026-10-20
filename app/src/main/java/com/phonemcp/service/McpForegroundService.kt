@@ -20,7 +20,9 @@ import com.phonemcp.core.Settings
 import com.phonemcp.core.TokenManager
 import com.phonemcp.core.ToolLog
 import com.phonemcp.mcp.McpServer
+import com.phonemcp.core.VpnStatus
 import com.phonemcp.tunnel.CloudflaredManager
+import com.phonemcp.tunnel.DohResolver
 import com.phonemcp.ui.MainActivity
 import com.phonemcp.update.UpdateManager
 import com.phonemcp.voice.ClaudeLauncher
@@ -43,6 +45,8 @@ class McpForegroundService : Service() {
     private var ttsReady = false
     private var watchdog: SilenceWatchdog? = null
     private var overlay: OverlayManager? = null
+    private var wakeLock: android.os.PowerManager.WakeLock? = null
+    private var netCallback: android.net.ConnectivityManager.NetworkCallback? = null
 
     private val updateHandler = Handler(Looper.getMainLooper())
     private val updateIntervalMs = 3L * 60 * 60 * 1000 // every 3 hours
@@ -87,6 +91,8 @@ class McpForegroundService : Service() {
 
         if (!started) {
             started = true
+            acquireWakeLock()
+            registerNetworkCallback()
             AppState.setStatus("Запуск сервера…")
             startServer()
             tunnelAttempt = 0
@@ -179,8 +185,22 @@ class McpForegroundService : Service() {
             return
         }
         tunnelAttempt++
+        // Resolve real edge IPs via DoH off the main thread, then launch.
+        Thread {
+            val edgeIps = try { DohResolver.edgeIps() } catch (e: Exception) { emptyList() }
+            ToolLog.add("tunnel", "edge ips: ${edgeIps.take(3).joinToString(",")}…", true)
+            startTunnelWith(cf, edgeIps)
+        }.start()
+    }
+
+    private fun startTunnelWith(cf: CloudflaredManager, edgeIps: List<String>) {
+        if (VpnStatus.isVpnActive(applicationContext)) {
+            ToolLog.add("tunnel", "VPN активен — если туннель не встанет, добавь приложение в исключения VPN", false)
+        }
+        scheduleVpnWarning()
         cf.start(
             localPort = Config.LOCAL_PORT,
+            edgeIps = edgeIps,
             onUrl = { base -> tunnelAttempt = 0; onTunnelUp(base) },
             onLog = { line ->
                 val bad = line.contains("err", true) || line.contains("fail", true) || line.contains("fatal", true)
@@ -224,6 +244,44 @@ class McpForegroundService : Service() {
             copyToClipboard(full)
             updateNotification("Коннектор готов", full)
         }
+    }
+
+    /** If still no connector after 20s and a VPN is on, tell the user what to do. */
+    private fun scheduleVpnWarning() {
+        updateHandler.postDelayed({
+            if (started && AppState.connectorUrl == null && VpnStatus.isVpnActive(applicationContext)) {
+                val msg = "Включён VPN и он, похоже, режет туннель (порт 7844). Добавь это приложение в исключения VPN (split tunneling) и перезапусти сервер."
+                AppState.setStatus(msg)
+                ToolLog.add("tunnel", msg, false)
+                notifySimple("Мешает VPN", msg)
+            }
+        }, 20_000)
+    }
+
+    private fun acquireWakeLock() {
+        try {
+            val pm = getSystemService(Context.POWER_SERVICE) as android.os.PowerManager
+            wakeLock = pm.newWakeLock(android.os.PowerManager.PARTIAL_WAKE_LOCK, "phonemcp:tunnel").apply {
+                setReferenceCounted(false)
+                acquire()
+            }
+        } catch (_: Exception) {}
+    }
+
+    private fun registerNetworkCallback() {
+        try {
+            val cm = getSystemService(Context.CONNECTIVITY_SERVICE) as android.net.ConnectivityManager
+            val cb = object : android.net.ConnectivityManager.NetworkCallback() {
+                override fun onAvailable(network: android.net.Network) {
+                    // Network (re)appeared — if the tunnel isn't up, restart it.
+                    if (started && AppState.connectorUrl == null) {
+                        updateHandler.post { if (started) { tunnelAttempt = 0; startTunnel() } }
+                    }
+                }
+            }
+            cm.registerDefaultNetworkCallback(cb)
+            netCallback = cb
+        } catch (_: Exception) {}
     }
 
     /** Push the current tunnel base to the Worker proxy so its stable URL forwards here. */
@@ -381,6 +439,10 @@ class McpForegroundService : Service() {
         overlay?.hide()
         updateHandler.removeCallbacks(updateTick)
         updateHandler.removeCallbacks(workerTick)
+        try { netCallback?.let { (getSystemService(Context.CONNECTIVITY_SERVICE) as android.net.ConnectivityManager).unregisterNetworkCallback(it) } } catch (_: Exception) {}
+        netCallback = null
+        try { if (wakeLock?.isHeld == true) wakeLock?.release() } catch (_: Exception) {}
+        wakeLock = null
         VoiceSession.end()
         server?.stop()
         cloudflared?.stop()

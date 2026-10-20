@@ -214,6 +214,27 @@ cloudflared напечатает строку вида `https://xxxx.trycloudfla
 
 ---
 
+## VPN (fake-IP) ломает туннель — что делать
+
+Если на телефоне включён VPN в режиме **fake-IP** (clash/sing-box и подобные —
+раздаёт адреса `198.18.0.0/15`), он отдаёт cloudflared фейковые IP для edge
+Cloudflare, и соединение на порт `7844` умирает (`TLS handshake with edge error:
+EOF`). Приложение это обходит: edge-адреса резолвятся через **DoH** (`1.1.1.1`,
+порт 443, мимо VPN-DNS), фейковые `198.18.x.x` отбрасываются, реальные IP
+передаются cloudflared флагом `--edge <ip>:7844`.
+
+Если VPN **полностью режет порт 7844** (а не только подменяет IP), самый
+надёжный путь — **исключить это приложение из VPN** (split tunneling): тогда
+cloudflared ходит напрямую. В своём VPN-клиенте (напр. Fast VPN) в
+`VpnService.Builder` добавь:
+
+```kotlin
+builder.addDisallowedApplication("com.phonemcp")
+```
+
+Тогда трафик Phone MCP (и cloudflared) идёт мимо VPN, а туннель встаёт даже при
+включённом VPN.
+
 ## Постоянный адрес без домена (Cloudflare Worker)
 
 Quick Tunnel даёт новый поддомен при каждом перезапуске, поэтому коннектор в

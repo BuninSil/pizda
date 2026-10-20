@@ -39,6 +39,7 @@ class CloudflaredManager(private val context: Context) {
      */
     fun start(
         localPort: Int,
+        edgeIps: List<String>,
         onUrl: (String) -> Unit,
         onLog: (String) -> Unit,
         onExit: (Int) -> Unit
@@ -52,19 +53,23 @@ class CloudflaredManager(private val context: Context) {
         }
         bin.setExecutable(true, false)
 
-        val pb = ProcessBuilder(
+        val args = arrayListOf(
             bin.absolutePath,
             "tunnel",
             "--no-autoupdate",
-            // Force the HTTP2 (TCP) edge protocol. The default QUIC uses UDP:7844,
-            // which is frequently blocked on cellular/carrier-NAT networks and makes
-            // cloudflared exit with code 1. HTTP2 goes over TCP and is far more
-            // reliable on mobile.
+            // HTTP2 (TCP) edge protocol — QUIC (UDP:7844) is often blocked.
             "--protocol", "http2",
-            "--edge-ip-version", "auto",
-            "--loglevel", "info",
-            "--url", "http://127.0.0.1:$localPort"
+            "--edge-ip-version", "4",
+            "--loglevel", "info"
         )
+        // Pin the edge to real IPs resolved via DoH, so a fake-IP VPN can't point
+        // cloudflared at a dead 198.18.x.x address.
+        if (edgeIps.isNotEmpty()) {
+            args.add("--edge")
+            args.add(edgeIps.joinToString(",") { "$it:7844" })
+        }
+        args.add("--url"); args.add("http://127.0.0.1:$localPort")
+        val pb = ProcessBuilder(args)
         pb.redirectErrorStream(true)
         pb.directory(context.cacheDir)
         // cloudflared keeps config/logs here.

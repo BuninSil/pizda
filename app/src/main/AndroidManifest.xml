@@ -17,6 +17,9 @@
     <!-- Floating "Call Claude" button over other apps. -->
     <uses-permission android:name="android.permission.SYSTEM_ALERT_WINDOW" />
 
+    <!-- Keep the CPU awake while the tunnel runs (MIUI kills background sockets). -->
+    <uses-permission android:name="android.permission.WAKE_LOCK" />
+
     <!-- In-app update: install the downloaded APK. -->
     <uses-permission android:name="android.permission.REQUEST_INSTALL_PACKAGES" />
 
