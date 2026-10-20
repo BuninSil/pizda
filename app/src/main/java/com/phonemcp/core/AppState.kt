@@ -21,6 +21,9 @@ object AppState {
     @Volatile var connectorUrl: String? = null
         private set
 
+    /** Raw tunnel base (e.g. https://foo-bar.trycloudflare.com), without token/path. */
+    @Volatile var tunnelBase: String? = null
+
     /** Human-readable status line for the UI/notification. */
     @Volatile var status: String = "Остановлено"
         private set

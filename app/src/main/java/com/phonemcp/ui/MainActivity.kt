@@ -59,6 +59,7 @@ class MainActivity : Activity(), AppState.Listener {
         findViewById<Button>(R.id.blacklistButton).setOnClickListener { editBlacklist() }
         findViewById<Button>(R.id.callClaudeButton).setOnClickListener { callClaude() }
         findViewById<Button>(R.id.voiceSettingsButton).setOnClickListener { voiceSettings() }
+        findViewById<Button>(R.id.workerButton).setOnClickListener { workerSettings() }
         findViewById<Button>(R.id.updateButton).setOnClickListener { checkUpdates(manual = true) }
         findViewById<TextView>(R.id.versionText).text = "Версия: ${UpdateManager.currentVersionLabel()}"
 
@@ -263,6 +264,52 @@ class MainActivity : Activity(), AppState.Listener {
                 Prefs.setDeepLinks(this, links.text.toString().split("\n").map { it.trim() }.filter { it.isNotEmpty() })
                 applyOverlaySetting(overlayCb.isChecked)
                 Toast.makeText(this, "Сохранено", Toast.LENGTH_SHORT).show()
+            }
+            .setNegativeButton("Отмена", null)
+            .show()
+    }
+
+    private fun workerSettings() {
+        val pad = (16 * resources.displayMetrics.density).toInt()
+        val root = LinearLayout(this).apply {
+            orientation = LinearLayout.VERTICAL
+            setPadding(pad, pad, pad, pad)
+        }
+        val info = TextView(this).apply {
+            text = "Постоянный адрес без домена. Разверни Worker (worker/phone-mcp-worker.js, " +
+                "инструкция в README), впиши его URL и секрет. Коннектор станет " +
+                "https://<worker>/<токен>/mcp и больше не будет меняться. Пусто = обычный туннель."
+            textSize = 13f
+        }
+        val urlLabel = TextView(this).apply { text = "Worker URL (https://имя.аккаунт.workers.dev):" }
+        val urlInput = EditText(this).apply {
+            setText(Prefs.workerBase(this@MainActivity))
+            hint = "https://phone-mcp.xxx.workers.dev"
+        }
+        val secretLabel = TextView(this).apply { text = "UPDATE_SECRET (как в воркере):" }
+        val secretInput = EditText(this).apply { setText(Prefs.workerSecret(this@MainActivity)) }
+
+        root.addView(info); root.addView(urlLabel); root.addView(urlInput)
+        root.addView(secretLabel); root.addView(secretInput)
+
+        AlertDialog.Builder(this)
+            .setTitle("Постоянный адрес (Worker)")
+            .setView(root)
+            .setPositiveButton("Сохранить") { _, _ ->
+                val base = urlInput.text.toString().trim().trimEnd('/')
+                if (base.isNotEmpty() && !base.startsWith("https://")) {
+                    Toast.makeText(this, "URL должен начинаться с https://", Toast.LENGTH_LONG).show()
+                    return@setPositiveButton
+                }
+                Prefs.setWorkerBase(this, base)
+                Prefs.setWorkerSecret(this, secretInput.text.toString())
+                Toast.makeText(this, if (base.isEmpty()) "Выключено — обычный туннель" else "Сохранено", Toast.LENGTH_SHORT).show()
+                if (AppState.running) {
+                    val intent = Intent(this, McpForegroundService::class.java)
+                        .setAction(McpForegroundService.ACTION_APPLY_WORKER)
+                    if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.O) startForegroundService(intent)
+                    else startService(intent)
+                }
             }
             .setNegativeButton("Отмена", null)
             .show()

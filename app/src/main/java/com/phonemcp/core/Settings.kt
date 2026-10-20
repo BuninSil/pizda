@@ -12,6 +12,8 @@ object Settings {
     private const val KEY_OVERLAY = "overlay_enabled"
     private const val KEY_WATCHDOG = "watchdog_enabled"
     private const val KEY_CONFIRM_SENDS = "confirm_sends_on_device"
+    private const val KEY_WORKER_BASE = "worker_base"
+    private const val KEY_WORKER_SECRET = "worker_secret"
 
     // No official Claude voice deep link is documented, and guessed schemes like
     // claude://voice "resolve" but open the wrong screen, so by default we skip
@@ -40,6 +42,15 @@ object Settings {
     // by voice through Claude; purchases/transfers/banking confirm regardless.
     fun confirmSendsOnDevice(c: Context): Boolean = prefs(c).getBoolean(KEY_CONFIRM_SENDS, false)
     fun setConfirmSendsOnDevice(c: Context, v: Boolean) = prefs(c).edit().putBoolean(KEY_CONFIRM_SENDS, v).apply()
+
+    // Stable-URL Worker proxy. When set, the connector URL is the Worker URL and
+    // the app pushes the current tunnel address to the Worker on each connect.
+    fun workerBase(c: Context): String =
+        prefs(c).getString(KEY_WORKER_BASE, "")!!.trim().trimEnd('/')
+    fun setWorkerBase(c: Context, v: String) = prefs(c).edit().putString(KEY_WORKER_BASE, v.trim().trimEnd('/')).apply()
+
+    fun workerSecret(c: Context): String = prefs(c).getString(KEY_WORKER_SECRET, "")!!
+    fun setWorkerSecret(c: Context, v: String) = prefs(c).edit().putString(KEY_WORKER_SECRET, v).apply()
 
     fun deepLinks(c: Context): List<String> {
         val raw = prefs(c).getString(KEY_DEEPLINKS, null) ?: return DEFAULT_DEEPLINKS

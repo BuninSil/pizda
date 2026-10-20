@@ -89,6 +89,7 @@ class McpForegroundService : Service() {
             ACTION_SHOW_OVERLAY -> { Settings.setOverlayEnabled(applicationContext, true); showOverlay() }
             ACTION_HIDE_OVERLAY -> { Settings.setOverlayEnabled(applicationContext, false); overlay?.hide() }
             ACTION_UPDATE -> doUpdateAsync()
+            ACTION_APPLY_WORKER -> AppState.tunnelBase?.let { onTunnelUp(it) }
         }
         return START_STICKY
     }
@@ -189,12 +190,46 @@ class McpForegroundService : Service() {
 
     private fun onTunnelUp(baseUrl: String) {
         val token = TokenManager.getToken(applicationContext)
-        val full = "$baseUrl/$token/mcp"
-        AppState.setConnectorUrl(full)
-        AppState.setStatus("Готово. Коннектор доступен.")
+        AppState.tunnelBase = baseUrl
         ToolLog.add("tunnel", "up: $baseUrl", true)
-        copyToClipboard(full)
-        updateNotification("Коннектор готов", full)
+
+        val workerBase = Settings.workerBase(applicationContext)
+        if (workerBase.isNotBlank()) {
+            // Stable URL mode: connector points at the Worker; tell it the new backend.
+            pushBackendToWorker(workerBase, baseUrl)
+            val full = "$workerBase/$token/mcp"
+            AppState.setConnectorUrl(full)
+            AppState.setStatus("Готово. Постоянный адрес (Worker).")
+            copyToClipboard(full)
+            updateNotification("Коннектор готов (постоянный)", full)
+        } else {
+            val full = "$baseUrl/$token/mcp"
+            AppState.setConnectorUrl(full)
+            AppState.setStatus("Готово. Коннектор доступен.")
+            copyToClipboard(full)
+            updateNotification("Коннектор готов", full)
+        }
+    }
+
+    /** Push the current tunnel base to the Worker proxy so its stable URL forwards here. */
+    private fun pushBackendToWorker(workerBase: String, backend: String) {
+        Thread {
+            try {
+                val conn = (java.net.URL("$workerBase/__set").openConnection() as java.net.HttpURLConnection).apply {
+                    requestMethod = "POST"
+                    connectTimeout = 15000; readTimeout = 15000
+                    doOutput = true
+                    setRequestProperty("Content-Type", "application/json")
+                    setRequestProperty("X-Update-Secret", Settings.workerSecret(applicationContext))
+                }
+                conn.outputStream.use { it.write("{\"url\":\"$backend\"}".toByteArray()) }
+                val code = conn.responseCode
+                conn.disconnect()
+                ToolLog.add("worker", if (code == 200) "backend обновлён" else "ошибка обновления: HTTP $code", code == 200)
+            } catch (e: Exception) {
+                ToolLog.add("worker", "не достучался до воркера: ${e.message}", false)
+            }
+        }.start()
     }
 
     private fun copyToClipboard(text: String) {
@@ -349,6 +384,7 @@ class McpForegroundService : Service() {
         const val ACTION_SHOW_OVERLAY = "com.phonemcp.SHOW_OVERLAY"
         const val ACTION_HIDE_OVERLAY = "com.phonemcp.HIDE_OVERLAY"
         const val ACTION_UPDATE = "com.phonemcp.UPDATE"
+        const val ACTION_APPLY_WORKER = "com.phonemcp.APPLY_WORKER"
         private const val MAX_TUNNEL_ATTEMPTS = 5
     }
 }
