@@ -34,15 +34,59 @@ class ControllerAccessibilityService : AccessibilityService() {
         instance = this
     }
 
+    @Volatile var lastWindowEventAt: Long = 0L
+        private set
+
     override fun onAccessibilityEvent(event: AccessibilityEvent?) {
         event ?: return
         when (event.eventType) {
             AccessibilityEvent.TYPE_WINDOW_STATE_CHANGED -> {
                 event.packageName?.let { currentPackage = it.toString() }
+                lastWindowEventAt = System.currentTimeMillis()
+            }
+            AccessibilityEvent.TYPE_WINDOW_CONTENT_CHANGED -> {
+                lastWindowEventAt = System.currentTimeMillis()
             }
             AccessibilityEvent.TYPE_VIEW_CLICKED -> {
                 handleLearningClick(event)
             }
+        }
+    }
+
+    /** Wait until window events go quiet (quietMs) or maxMs elapses. */
+    fun waitForStable(maxMs: Long = 1500, quietMs: Long = 350) {
+        val start = System.currentTimeMillis()
+        while (System.currentTimeMillis() - start < maxMs) {
+            if (System.currentTimeMillis() - lastWindowEventAt > quietMs) return
+            try { Thread.sleep(50) } catch (_: InterruptedException) { return }
+        }
+    }
+
+    /** Snapshot of visible texts/descriptions, for computing screen diffs. */
+    fun visibleTexts(limit: Int = 250): Set<String> {
+        val root = rootInActiveWindow ?: return emptySet()
+        val set = LinkedHashSet<String>()
+        val stack = ArrayDeque<AccessibilityNodeInfo>()
+        stack.add(root)
+        var guard = 0
+        while (stack.isNotEmpty() && set.size < limit && guard < 4000) {
+            guard++
+            val n = stack.removeFirst()
+            if (n.isVisibleToUser) {
+                n.text?.toString()?.ifBlank { null }?.let { set.add(it) }
+                n.contentDescription?.toString()?.ifBlank { null }?.let { set.add(it) }
+            }
+            for (i in 0 until n.childCount) n.getChild(i)?.let { stack.add(it) }
+        }
+        return set
+    }
+
+    /** Best-effort title of the active window. */
+    fun windowTitle(): String? {
+        return try {
+            windows.firstOrNull { it.isActive }?.title?.toString()?.ifBlank { null }
+        } catch (e: Exception) {
+            null
         }
     }
 
@@ -186,48 +230,124 @@ class ControllerAccessibilityService : AccessibilityService() {
 
     private fun shortClass(c: String): String = c.substringAfterLast('.')
 
+    /** One collected, interactable/text-bearing element with a stable index. */
+    class Element(
+        val node: AccessibilityNodeInfo,
+        val text: String?,
+        val desc: String?,
+        val id: String?,
+        val clickable: Boolean,
+        val editable: Boolean,
+        val checkable: Boolean,
+        val checked: Boolean,
+        val cx: Int,
+        val cy: Int
+    )
+
     /**
-     * Compact, token-cheap view of the screen: a flat list of only the visible,
-     * meaningful elements (ones with text/desc, or clickable/editable), with just
-     * text/desc/id/flags and the tap centre — no empty containers, no bounds.
+     * Recursively collect the screen's meaningful elements in a stable
+     * (pre-order) sequence. Clickable containers with no own text get their
+     * children's text merged in, so list rows (Telegram chats, forum topics…)
+     * show up. include_all also emits non-clickable text nodes everywhere.
      */
-    fun dumpScreenCompact(maxNodes: Int = 150): JSONObject {
+    fun collectElements(includeAll: Boolean, maxNodes: Int = 250): List<Element> {
+        val out = ArrayList<Element>()
+        val root = rootInActiveWindow ?: return out
+        collect(root, includeAll, false, out, maxNodes)
+        return out
+    }
+
+    private fun collect(
+        node: AccessibilityNodeInfo,
+        includeAll: Boolean,
+        suppressText: Boolean,
+        out: ArrayList<Element>,
+        maxNodes: Int
+    ) {
+        if (out.size >= maxNodes) return
+        val r = Rect()
+        node.getBoundsInScreen(r)
+        val visible = node.isVisibleToUser && r.width() > 0 && r.height() > 0
+        val own = (node.text?.toString()?.ifBlank { null }) ?: node.contentDescription?.toString()?.ifBlank { null }
+        val interactive = node.isClickable || node.isEditable || node.isCheckable
+        var childSuppress = suppressText
+
+        if (visible) {
+            if (interactive) {
+                val label = own ?: mergeChildText(node)
+                out.add(
+                    Element(
+                        node,
+                        node.text?.toString()?.ifBlank { null } ?: label,
+                        node.contentDescription?.toString()?.ifBlank { null },
+                        node.viewIdResourceName,
+                        node.isClickable, node.isEditable, node.isCheckable, node.isChecked,
+                        r.centerX(), r.centerY()
+                    )
+                )
+                if (!label.isNullOrBlank()) childSuppress = true
+            } else if (own != null && (includeAll || !suppressText)) {
+                out.add(
+                    Element(
+                        node, node.text?.toString()?.ifBlank { null },
+                        node.contentDescription?.toString()?.ifBlank { null },
+                        node.viewIdResourceName, false, false, false, false,
+                        r.centerX(), r.centerY()
+                    )
+                )
+            }
+        }
+        for (i in 0 until node.childCount) {
+            if (out.size >= maxNodes) break
+            node.getChild(i)?.let { collect(it, includeAll, childSuppress, out, maxNodes) }
+        }
+    }
+
+    /** Join all descendant text/desc of a node (bounded), for labelling containers. */
+    private fun mergeChildText(node: AccessibilityNodeInfo): String? {
+        val parts = ArrayList<String>()
+        val stack = ArrayDeque<AccessibilityNodeInfo>()
+        for (i in 0 until node.childCount) node.getChild(i)?.let { stack.add(it) }
+        var guard = 0
+        while (stack.isNotEmpty() && parts.size < 12 && guard < 300) {
+            guard++
+            val n = stack.removeFirst()
+            (n.text?.toString()?.ifBlank { null } ?: n.contentDescription?.toString()?.ifBlank { null })
+                ?.let { parts.add(it) }
+            for (i in 0 until n.childCount) n.getChild(i)?.let { stack.add(it) }
+        }
+        val joined = parts.joinToString(" | ").trim()
+        return joined.ifBlank { null }?.take(200)
+    }
+
+    fun dumpScreenCompact(includeAll: Boolean = false): JSONObject {
         val out = JSONObject()
         out.put("package", activePackage() ?: JSONObject.NULL)
         val elements = JSONArray()
-        val root = rootInActiveWindow
-        if (root != null) {
-            val stack = ArrayDeque<AccessibilityNodeInfo>()
-            stack.add(root)
-            val r = Rect()
-            var guard = 0
-            while (stack.isNotEmpty() && elements.length() < maxNodes && guard < 4000) {
-                guard++
-                val n = stack.removeFirst()
-                val text = n.text?.toString()?.ifBlank { null }
-                val desc = n.contentDescription?.toString()?.ifBlank { null }
-                val meaningful = (text != null || desc != null || n.isClickable || n.isEditable)
-                if (meaningful && n.isVisibleToUser) {
-                    n.getBoundsInScreen(r)
-                    if (r.width() > 0 && r.height() > 0) {
-                        val e = JSONObject()
-                        text?.let { e.put("text", it) }
-                        desc?.let { e.put("desc", it) }
-                        n.viewIdResourceName?.let { e.put("id", it) }
-                        if (n.isClickable) e.put("clickable", true)
-                        if (n.isEditable) e.put("editable", true)
-                        if (n.isCheckable) e.put("checked", n.isChecked)
-                        e.put("cx", r.centerX())
-                        e.put("cy", r.centerY())
-                        elements.put(e)
-                    }
-                }
-                for (i in 0 until n.childCount) n.getChild(i)?.let { stack.add(it) }
-            }
+        collectElements(includeAll).forEachIndexed { i, e ->
+            val o = JSONObject()
+            o.put("i", i)
+            e.text?.let { o.put("text", it) }
+            e.desc?.let { o.put("desc", it) }
+            e.id?.let { o.put("id", it) }
+            if (e.clickable) o.put("clickable", true)
+            if (e.editable) o.put("editable", true)
+            if (e.checkable) o.put("checked", e.checked)
+            o.put("cx", e.cx)
+            o.put("cy", e.cy)
+            elements.put(o)
         }
         out.put("elements", elements)
         out.put("count", elements.length())
         return out
+    }
+
+    /** tap_index: click the i-th element from collectElements (default collection). */
+    fun tapIndex(i: Int): Boolean {
+        val els = collectElements(false)
+        val e = els.getOrNull(i) ?: return false
+        if (clickNode(e.node)) return true
+        return tap(e.cx, e.cy)
     }
 
     /** Polls for an element (view id or visible text) up to timeoutMs. */
@@ -252,9 +372,15 @@ class ControllerAccessibilityService : AccessibilityService() {
 
     // --- Screenshot (API 30+) --------------------------------------------
 
-    fun takeScreenshotBase64(): String? {
+    fun screenshotJpeg(maxWidth: Int = 720, quality: Int = 70): ByteArray? {
         if (Build.VERSION.SDK_INT < Build.VERSION_CODES.R) return null
-        return ScreenshotHelper.capture(this)
+        return ScreenshotHelper.captureJpeg(this, maxWidth, quality)
+    }
+
+    /** Full-resolution bitmap for OCR (caller recycles). */
+    fun screenshotBitmapFull(): android.graphics.Bitmap? {
+        if (Build.VERSION.SDK_INT < Build.VERSION_CODES.R) return null
+        return ScreenshotHelper.captureBitmapFull(this)
     }
 
     // --- Gestures ---------------------------------------------------------
@@ -394,6 +520,8 @@ class ControllerAccessibilityService : AccessibilityService() {
     fun elementPresent(selector: String): Boolean = findNode(selector) != null
 
     // --- System panels ----------------------------------------------------
+
+    fun isShadeOpen(): Boolean = activePackage() == "com.android.systemui"
 
     fun openNotifications(): Boolean = performGlobalAction(GLOBAL_ACTION_NOTIFICATIONS)
 

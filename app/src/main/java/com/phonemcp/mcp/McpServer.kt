@@ -27,30 +27,33 @@ class McpServer(
     override fun serve(session: IHTTPSession): Response {
         val token = TokenManager.getToken(context)
         val path = session.uri.trim('/')
-        val expectedPath = "$token/mcp"
+        val prefix = "$token/"
 
-        // Constant-ish path/token check.
-        if (!pathMatches(expectedPath, path)) {
+        // The path must start with "<token>/"; compare the token part constant-time.
+        val slash = path.indexOf('/')
+        val providedToken = if (slash >= 0) path.substring(0, slash) else path
+        if (!TokenManager.matches(token, providedToken)) {
             return newFixedLengthResponse(Response.Status.NOT_FOUND, "text/plain", "not found")
         }
+        val rest = path.removePrefix(prefix)
 
-        return when (session.method) {
-            Method.POST -> handlePost(session)
-            Method.GET -> newFixedLengthResponse(
-                Response.Status.METHOD_NOT_ALLOWED, "text/plain", "use POST"
-            )
-            else -> newFixedLengthResponse(
-                Response.Status.METHOD_NOT_ALLOWED, "text/plain", "use POST"
-            )
+        return when {
+            rest == "mcp" && session.method == Method.POST -> handlePost(session)
+            rest == "mcp" -> newFixedLengthResponse(
+                Response.Status.METHOD_NOT_ALLOWED, "text/plain", "use POST")
+            rest.startsWith("file/") -> serveFile(rest.removePrefix("file/"))
+            else -> newFixedLengthResponse(Response.Status.NOT_FOUND, "text/plain", "not found")
         }
     }
 
-    private fun pathMatches(expected: String, actual: String): Boolean {
-        // expected = "<token>/mcp" ; compare the token part constant-time.
-        val eTok = expected.substringBeforeLast("/mcp", "")
-        val aTok = actual.substringBeforeLast("/mcp", "")
-        if (!actual.endsWith("/mcp")) return false
-        return TokenManager.matches(eTok, aTok)
+    private fun serveFile(name: String): Response {
+        val f = FileStore.get(context, name)
+            ?: return newFixedLengthResponse(Response.Status.NOT_FOUND, "text/plain", "not found")
+        return try {
+            newChunkedResponse(Response.Status.OK, FileStore.contentType(name), f.inputStream())
+        } catch (e: Exception) {
+            newFixedLengthResponse(Response.Status.INTERNAL_ERROR, "text/plain", "read error")
+        }
     }
 
     private fun handlePost(session: IHTTPSession): Response {

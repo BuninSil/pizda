@@ -122,5 +122,9 @@ dependencies {
     implementation("androidx.lifecycle:lifecycle-service:2.8.4")
     // Tiny embedded HTTP server for the MCP Streamable-HTTP endpoint on localhost.
     implementation("org.nanohttpd:nanohttpd:2.3.1")
+    // Offline on-device OCR fallback (rus+eng) for screens with few accessibility
+    // texts. Tesseract 4/5 (LSTM) via Tesseract4Android, matching tessdata_fast
+    // models in assets. Published on JitPack. Package: com.googlecode.tesseract.android.
+    implementation("com.github.adaptech-cz.Tesseract4Android:tesseract4android:4.7.0")
     // org.json ships with the Android platform, so no dependency needed for JSON.
 }

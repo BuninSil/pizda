@@ -10,6 +10,8 @@ dependencyResolutionManagement {
     repositories {
         google()
         mavenCentral()
+        // Tesseract4Android (Tesseract 4/5, LSTM — matches tessdata_fast models).
+        maven { url = uri("https://jitpack.io") }
     }
 }
 
