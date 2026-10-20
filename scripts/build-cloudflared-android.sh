@@ -38,6 +38,44 @@ echo "Cloning cloudflared $VERSION..."
 git clone --depth 1 --branch "$VERSION" https://github.com/cloudflare/cloudflared.git "$WORK/src"
 
 cd "$WORK/src"
+
+# --- DNS patch ------------------------------------------------------------
+# Android has no /etc/resolv.conf, so Go's resolver hits [::1]:53 and every
+# lookup fails — including the SRV records cloudflared needs to find the edge
+# (that failure makes the quick tunnel exit and churn its URL). Inject a
+# pure-Go resolver that talks to public DNS directly; this works through a VPN
+# tunnel too, so the tunnel stays up.
+cat > cmd/cloudflared/zz_android_resolver.go <<'PATCH'
+//go:build android
+
+package main
+
+import (
+	"context"
+	"net"
+	"time"
+)
+
+func init() {
+	servers := []string{"1.1.1.1:53", "8.8.8.8:53", "9.9.9.9:53"}
+	net.DefaultResolver = &net.Resolver{
+		PreferGo: true,
+		Dial: func(ctx context.Context, network, address string) (net.Conn, error) {
+			d := net.Dialer{Timeout: 8 * time.Second}
+			var lastErr error
+			for _, s := range servers {
+				if c, err := d.DialContext(ctx, network, s); err == nil {
+					return c, nil
+				} else {
+					lastErr = err
+				}
+			}
+			return nil, lastErr
+		},
+	}
+}
+PATCH
+
 echo "Building (android/arm64, CGO via $CC)..."
 CGO_ENABLED=1 GOOS=android GOARCH=arm64 GOTOOLCHAIN=auto GOFLAGS=-mod=mod CC="$CC" \
   go build -ldflags "-X main.Version=$VERSION -s -w" -o "$OUT" ./cmd/cloudflared
