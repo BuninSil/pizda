@@ -53,6 +53,19 @@ class McpForegroundService : Service() {
         }
     }
 
+    // Self-heal: while a Worker is configured, keep re-pushing the current tunnel
+    // base to it so its stable URL always points at a live tunnel even after a
+    // flap where a push was missed.
+    private val workerIntervalMs = 90_000L
+    private val workerTick = object : Runnable {
+        override fun run() {
+            val wb = Settings.workerBase(applicationContext)
+            val base = AppState.tunnelBase
+            if (wb.isNotBlank() && !base.isNullOrBlank()) pushBackendToWorker(wb, base)
+            updateHandler.postDelayed(this, workerIntervalMs)
+        }
+    }
+
     override fun onBind(intent: Intent?): IBinder? = null
 
     override fun onCreate() {
@@ -80,6 +93,8 @@ class McpForegroundService : Service() {
             startTunnel()
             // First update check ~30s after start, then every few hours.
             updateHandler.postDelayed(updateTick, 30_000)
+            // Keep the Worker's backend fresh (self-heal after tunnel flaps).
+            updateHandler.postDelayed(workerTick, workerIntervalMs)
         }
 
         if (Settings.overlayEnabled(applicationContext)) showOverlay()
@@ -176,7 +191,7 @@ class McpForegroundService : Service() {
                 ToolLog.add("tunnel", "exited: $code", false)
                 // Auto-retry a few times unless we were deliberately stopped.
                 if (!cf.stopped && started && tunnelAttempt < MAX_TUNNEL_ATTEMPTS) {
-                    val delay = 3000L * tunnelAttempt
+                    val delay = (3000L * tunnelAttempt).coerceAtMost(30_000L)
                     AppState.setStatus("Туннель упал (код $code). Перезапуск через ${delay / 1000}с… (попытка ${tunnelAttempt + 1}/$MAX_TUNNEL_ATTEMPTS)")
                     updateNotification("Перезапускаю туннель…", null)
                     updateHandler.postDelayed({ if (started) startTunnel() }, delay)
@@ -365,6 +380,7 @@ class McpForegroundService : Service() {
         watchdog?.stop()
         overlay?.hide()
         updateHandler.removeCallbacks(updateTick)
+        updateHandler.removeCallbacks(workerTick)
         VoiceSession.end()
         server?.stop()
         cloudflared?.stop()
@@ -385,6 +401,6 @@ class McpForegroundService : Service() {
         const val ACTION_HIDE_OVERLAY = "com.phonemcp.HIDE_OVERLAY"
         const val ACTION_UPDATE = "com.phonemcp.UPDATE"
         const val ACTION_APPLY_WORKER = "com.phonemcp.APPLY_WORKER"
-        private const val MAX_TUNNEL_ATTEMPTS = 5
+        private const val MAX_TUNNEL_ATTEMPTS = 100
     }
 }
