@@ -24,31 +24,51 @@ object UpdateManager {
 
     data class UpdateInfo(val versionCode: Int, val tag: String, val apkUrl: String, val notes: String)
 
+    /** Explicit outcome so the UI never confuses "up to date" with "check failed". */
+    sealed class Outcome {
+        data class Available(val info: UpdateInfo) : Outcome()
+        data class UpToDate(val latest: Int) : Outcome()
+        data class Failed(val reason: String) : Outcome()
+    }
+
     private val apiUrl = "https://api.github.com/repos/${BuildConfig.UPDATE_REPO}/releases/latest"
 
-    /** Blocking — call from a worker thread. Returns null if up to date or on error. */
-    fun check(): UpdateInfo? {
+    /** Blocking — call from a worker thread. */
+    fun check(): Outcome {
         return try {
-            val json = httpGet(apiUrl) ?: return null
-            val obj = JSONObject(json)
+            val (code, body) = httpGet(apiUrl)
+            if (code != 200 || body == null) {
+                val reason = when (code) {
+                    403 -> "GitHub API лимит/доступ (403). Повтори позже."
+                    404 -> "релиз не найден (404). Репозиторий публичный?"
+                    -1 -> "нет сети или не достучаться до GitHub"
+                    else -> "GitHub ответил $code"
+                }
+                ToolLog.add("update", "check failed: $reason", false)
+                return Outcome.Failed(reason)
+            }
+            val obj = JSONObject(body)
             val tag = obj.optString("tag_name")
-            val latestCode = tag.filter { it.isDigit() }.toIntOrNull() ?: return null
-            if (latestCode <= BuildConfig.VERSION_CODE) return null
+            val latestCode = tag.filter { it.isDigit() }.toIntOrNull()
+                ?: return Outcome.Failed("не разобрал тег релиза '$tag'")
+            if (latestCode <= BuildConfig.VERSION_CODE) return Outcome.UpToDate(latestCode)
 
-            val assets = obj.optJSONArray("assets") ?: return null
+            val assets = obj.optJSONArray("assets")
             var apkUrl: String? = null
-            for (i in 0 until assets.length()) {
-                val a = assets.getJSONObject(i)
-                if (a.optString("name").endsWith(".apk")) {
-                    apkUrl = a.optString("browser_download_url")
-                    break
+            if (assets != null) {
+                for (i in 0 until assets.length()) {
+                    val a = assets.getJSONObject(i)
+                    if (a.optString("name").endsWith(".apk")) {
+                        apkUrl = a.optString("browser_download_url")
+                        break
+                    }
                 }
             }
-            if (apkUrl.isNullOrBlank()) return null
-            UpdateInfo(latestCode, tag, apkUrl, obj.optString("body").take(500))
+            if (apkUrl.isNullOrBlank()) return Outcome.Failed("в релизе $tag нет .apk")
+            Outcome.Available(UpdateInfo(latestCode, tag, apkUrl, obj.optString("body").take(500)))
         } catch (e: Exception) {
             ToolLog.add("update", "check failed: ${e.message}", false)
-            null
+            Outcome.Failed(e.message ?: "ошибка проверки")
         }
     }
 
@@ -101,18 +121,24 @@ object UpdateManager {
 
     fun currentVersionLabel(): String = "${BuildConfig.VERSION_NAME} (${BuildConfig.VERSION_CODE})"
 
-    private fun httpGet(urlStr: String): String? {
-        val conn = (URL(urlStr).openConnection() as HttpURLConnection).apply {
-            connectTimeout = 15000
-            readTimeout = 20000
-            setRequestProperty("User-Agent", "PhoneMCP")
-            setRequestProperty("Accept", "application/vnd.github+json")
-        }
+    /** @return (httpCode, body). code -1 means the request threw (no net / DNS / TLS). */
+    private fun httpGet(urlStr: String): Pair<Int, String?> {
         return try {
-            if (conn.responseCode != 200) return null
-            conn.inputStream.bufferedReader().use { it.readText() }
-        } finally {
-            conn.disconnect()
+            val conn = (URL(urlStr).openConnection() as HttpURLConnection).apply {
+                connectTimeout = 15000
+                readTimeout = 20000
+                setRequestProperty("User-Agent", "PhoneMCP")
+                setRequestProperty("Accept", "application/vnd.github+json")
+            }
+            try {
+                val code = conn.responseCode
+                val body = if (code == 200) conn.inputStream.bufferedReader().use { it.readText() } else null
+                Pair(code, body)
+            } finally {
+                conn.disconnect()
+            }
+        } catch (e: Exception) {
+            Pair(-1, null)
         }
     }
 }

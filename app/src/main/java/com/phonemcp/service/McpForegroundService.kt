@@ -97,7 +97,7 @@ class McpForegroundService : Service() {
 
     private fun checkForUpdateAsync() {
         Thread {
-            val info = UpdateManager.check() ?: return@Thread
+            val info = (UpdateManager.check() as? UpdateManager.Outcome.Available)?.info ?: return@Thread
             ToolLog.add("update", "available: ${info.tag}", true)
             notifyUpdate(info.tag)
         }.start()
@@ -105,10 +105,10 @@ class McpForegroundService : Service() {
 
     private fun doUpdateAsync() {
         Thread {
-            val info = UpdateManager.check()
-            if (info == null) {
-                notifySimple("Обновлений нет", "У тебя уже последняя версия.")
-                return@Thread
+            val info = when (val o = UpdateManager.check()) {
+                is UpdateManager.Outcome.Available -> o.info
+                is UpdateManager.Outcome.UpToDate -> { notifySimple("Обновлений нет", "У тебя уже последняя версия."); return@Thread }
+                is UpdateManager.Outcome.Failed -> { notifySimple("Не удалось проверить", o.reason); return@Thread }
             }
             notifySimple("Скачиваю обновление…", info.tag)
             val apk = UpdateManager.download(applicationContext, info)

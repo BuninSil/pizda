@@ -76,25 +76,33 @@ class MainActivity : Activity(), AppState.Listener {
     private fun checkUpdates(manual: Boolean) {
         if (manual) Toast.makeText(this, "Проверяю обновления…", Toast.LENGTH_SHORT).show()
         Thread {
-            val info = UpdateManager.check()
+            val outcome = UpdateManager.check()
             runOnUiThread {
                 if (isFinishing) return@runOnUiThread
-                if (info == null) {
-                    if (manual) Toast.makeText(this, "У тебя последняя версия", Toast.LENGTH_SHORT).show()
-                    return@runOnUiThread
-                }
-                AlertDialog.Builder(this)
-                    .setTitle("Есть обновление (${info.tag})")
-                    .setMessage(info.notes.ifBlank { "Доступна новая версия. Обновить сейчас?" })
-                    .setPositiveButton("Обновить") { _, _ ->
-                        val intent = Intent(this, McpForegroundService::class.java)
-                            .setAction(McpForegroundService.ACTION_UPDATE)
-                        if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.O) startForegroundService(intent)
-                        else startService(intent)
-                        Toast.makeText(this, "Скачиваю и открою установщик…", Toast.LENGTH_LONG).show()
+                when (outcome) {
+                    is UpdateManager.Outcome.Available -> {
+                        val info = outcome.info
+                        AlertDialog.Builder(this)
+                            .setTitle("Есть обновление (${info.tag})")
+                            .setMessage(info.notes.ifBlank { "Доступна новая версия. Обновить сейчас?" })
+                            .setPositiveButton("Обновить") { _, _ ->
+                                val intent = Intent(this, McpForegroundService::class.java)
+                                    .setAction(McpForegroundService.ACTION_UPDATE)
+                                if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.O) startForegroundService(intent)
+                                else startService(intent)
+                                Toast.makeText(this, "Скачиваю и открою установщик…", Toast.LENGTH_LONG).show()
+                            }
+                            .setNegativeButton("Позже", null)
+                            .show()
                     }
-                    .setNegativeButton("Позже", null)
-                    .show()
+                    is UpdateManager.Outcome.UpToDate ->
+                        if (manual) Toast.makeText(this,
+                            "Актуально: v${outcome.latest}, у тебя ${UpdateManager.currentVersionLabel()}",
+                            Toast.LENGTH_SHORT).show()
+                    is UpdateManager.Outcome.Failed ->
+                        if (manual) Toast.makeText(this,
+                            "Не удалось проверить: ${outcome.reason}", Toast.LENGTH_LONG).show()
+                }
             }
         }.start()
     }
