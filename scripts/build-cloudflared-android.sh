@@ -76,6 +76,15 @@ func init() {
 }
 PATCH
 
+# Silence the non-fatal "Failed to refresh DNS local resolver ... [::1]:53" spam:
+# cloudflared's virtual DNS origin service refreshes by resolving
+# region1.v2.argotunnel.com via the system resolver, which on Android is
+# [::1]:53 (nothing there). We don't use the dns:// virtual origin, and its
+# refresh loop is skipped when the resolver is marked static — so mark it static.
+if ! grep -q "static:    true," ingress/origins/dns.go; then
+  sed -i '/addresses: \[\]netip.AddrPort{defaultResolverAddr},/a\        static:    true,' ingress/origins/dns.go
+fi
+
 echo "Building (android/arm64, CGO via $CC)..."
 CGO_ENABLED=1 GOOS=android GOARCH=arm64 GOTOOLCHAIN=auto GOFLAGS=-mod=mod CC="$CC" \
   go build -ldflags "-X main.Version=$VERSION -s -w" -o "$OUT" ./cmd/cloudflared
