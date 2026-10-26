@@ -70,6 +70,24 @@ class McpForegroundService : Service() {
         }
     }
 
+    // Local server liveness: if NanoHTTPD died, cloudflared gets connection
+    // refused on :8765 and the connector returns 502 — so check it and restart.
+    private val serverIntervalMs = 15_000L
+    private val serverTick = object : Runnable {
+        override fun run() {
+            if (started) {
+                // Probe off the main thread (socket connect can block briefly).
+                Thread {
+                    if (started && !isServerAlive()) {
+                        ToolLog.add("server", "сервер не отвечает на :${Config.LOCAL_PORT} — перезапуск", false)
+                        startServer()
+                    }
+                }.start()
+            }
+            updateHandler.postDelayed(this, serverIntervalMs)
+        }
+    }
+
     override fun onBind(intent: Intent?): IBinder? = null
 
     override fun onCreate() {
@@ -101,6 +119,8 @@ class McpForegroundService : Service() {
             updateHandler.postDelayed(updateTick, 30_000)
             // Keep the Worker's backend fresh (self-heal after tunnel flaps).
             updateHandler.postDelayed(workerTick, workerIntervalMs)
+            // Watch the local server and restart it if it dies (prevents 502).
+            updateHandler.postDelayed(serverTick, serverIntervalMs)
         }
 
         if (Settings.overlayEnabled(applicationContext)) showOverlay()
@@ -160,6 +180,9 @@ class McpForegroundService : Service() {
     }
 
     private fun startServer() {
+        // Drop any previous (possibly dead) instance so the port is free.
+        try { server?.stop() } catch (_: Exception) {}
+        server = null
         try {
             val s = McpServer(applicationContext, Config.LOCAL_PORT)
             s.start(0, false)
@@ -169,6 +192,20 @@ class McpForegroundService : Service() {
         } catch (e: Exception) {
             AppState.setStatus("Ошибка сервера: ${e.message}")
             ToolLog.add("server", "error: ${e.message}", false)
+        }
+    }
+
+    /** True if NanoHTTPD is alive AND the port actually accepts a TCP connection. */
+    private fun isServerAlive(): Boolean {
+        val s = server ?: return false
+        if (!s.isAlive) return false
+        return try {
+            java.net.Socket().use { sock ->
+                sock.connect(java.net.InetSocketAddress("127.0.0.1", Config.LOCAL_PORT), 1500)
+                true
+            }
+        } catch (e: Exception) {
+            false
         }
     }
 
@@ -448,6 +485,7 @@ class McpForegroundService : Service() {
         overlay?.hide()
         updateHandler.removeCallbacks(updateTick)
         updateHandler.removeCallbacks(workerTick)
+        updateHandler.removeCallbacks(serverTick)
         try { netCallback?.let { (getSystemService(Context.CONNECTIVITY_SERVICE) as android.net.ConnectivityManager).unregisterNetworkCallback(it) } } catch (_: Exception) {}
         netCallback = null
         try { if (wakeLock?.isHeld == true) wakeLock?.release() } catch (_: Exception) {}
