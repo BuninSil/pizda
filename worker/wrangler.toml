@@ -3,14 +3,19 @@
 #   cd worker
 #   npm i -g wrangler
 #   wrangler login
-#   wrangler secret put UPDATE_SECRET   # same value baked into the app as RELAY_SECRET
 #   wrangler deploy
 #
-# Your Worker URL is printed by `wrangler deploy`
-# (https://phone-mcp.<your-subdomain>.workers.dev). Put that (without a trailing
-# slash) into the app's "Постоянный адрес", or bake it in as RELAY_WORKER.
+# `name` MUST match the existing Worker so `deploy` updates it in place and the
+# URL baked into the app (RELAY_WORKER) keeps working — do NOT rename it, or you
+# get a new Worker at a different URL. The current one lives at
+# https://raspy-dew-5339.vladislav20050705.workers.dev.
+#
+# The auth secret is OPTIONAL. Skip it and the Worker lets the phone connect with
+# no secret (same as before). To turn it on: `wrangler secret put UPDATE_SECRET`
+# and set the SAME value as the app's RELAY_SECRET (GitHub Secret). Leave both
+# unset = no secret.
 
-name = "phone-mcp"
+name = "raspy-dew-5339"
 main = "phone-mcp-worker.js"
 compatibility_date = "2024-09-01"
 

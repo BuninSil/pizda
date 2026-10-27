@@ -204,14 +204,19 @@ VPN или без — работает одинаково.
 cd worker
 npm i -g wrangler
 wrangler login
-# Секрет: та же строка, что вшита в приложение как RELAY_SECRET. НЕ коммить её.
-wrangler secret put UPDATE_SECRET
 wrangler deploy
 ```
 
-`wrangler deploy` напечатает URL (`https://phone-mcp.<аккаунт>.workers.dev`).
+`name` в `wrangler.toml` = имя **существующего** воркера (`raspy-dew-5339`),
+чтобы `deploy` обновил его на месте и вшитый в приложение `RELAY_WORKER` не
+протух. Не переименовывай — иначе получишь новый воркер на другом URL.
 `wrangler.toml` уже содержит привязку Durable Object (`PHONE_RELAY` →
 `PhoneRelay`) и миграцию `v1` (`new_sqlite_classes`), KV больше не нужен.
+
+**Секрет опциональный** (как и раньше). Без него телефон подключается без
+проверки — для личного тула норм. Хочешь включить: `wrangler secret put
+UPDATE_SECRET` и тот же строкой выставь `RELAY_SECRET` (GitHub Secret / сборка).
+Оба пустые = без секрета.
 
 Этот URL пропиши:
 
