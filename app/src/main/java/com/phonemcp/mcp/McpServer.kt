@@ -33,7 +33,14 @@ class McpServer(
         val slash = path.indexOf('/')
         val providedToken = if (slash >= 0) path.substring(0, slash) else path
         if (!TokenManager.matches(token, providedToken)) {
-            return newFixedLengthResponse(Response.Status.NOT_FOUND, "text/plain", "not found")
+            // 404, never 401: claude.ai reads 401 as "this resource wants OAuth"
+            // and aborts the connect with "Не удалось начать вход". A wrong token
+            // is simply an unknown path here, and we add NO WWW-Authenticate header.
+            return newFixedLengthResponse(
+                Response.Status.NOT_FOUND, "text/plain",
+                "unknown path: wrong or missing token in the connector URL. " +
+                    "This is not an OAuth-protected resource — check the full " +
+                    "https://<tunnel>/<token>/mcp URL from the app.")
         }
         val rest = path.removePrefix(prefix)
 

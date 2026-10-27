@@ -249,8 +249,7 @@ class McpForegroundService : Service() {
             edgeIps = edgeIps,
             onUrl = { base -> tunnelAttempt = 0; onTunnelUp(base) },
             onLog = { line ->
-                val bad = line.contains("err", true) || line.contains("fail", true) || line.contains("fatal", true)
-                ToolLog.add("cloudflared", line, !bad)
+                ToolLog.add("cloudflared", line, !isBadCloudflaredLine(line))
             },
             onExit = { code ->
                 AppState.setConnectorUrl(null)
@@ -302,6 +301,25 @@ class McpForegroundService : Service() {
                 notifySimple("Мешает VPN", msg)
             }
         }, 20_000)
+    }
+
+    /**
+     * cloudflared logs come in on stderr, so marking every line ✗ just because it
+     * wasn't stdout was wrong — most of them are INF. Decide by the zerolog level
+     * token (TRC/DBG/INF/WRN/ERR/FTL/PNC) instead: only ERR/FTL/PNC are real
+     * failures. Lines with no level token are our own synthetic notes — fall back
+     * to a word check so a "failed to start" still shows ✗.
+     */
+    private fun isBadCloudflaredLine(line: String): Boolean {
+        val m = LEVEL_RE.find(line)
+        if (m != null) {
+            return when (m.groupValues[1]) {
+                "ERR", "FTL", "PNC" -> true
+                else -> false // TRC, DBG, INF, WRN
+            }
+        }
+        return line.contains("err", true) || line.contains("fail", true) ||
+            line.contains("fatal", true)
     }
 
     private fun acquireWakeLock() {
@@ -511,5 +529,8 @@ class McpForegroundService : Service() {
         const val ACTION_UPDATE = "com.phonemcp.UPDATE"
         const val ACTION_APPLY_WORKER = "com.phonemcp.APPLY_WORKER"
         private const val MAX_TUNNEL_ATTEMPTS = 100
+        // zerolog level token as cloudflared prints it, e.g. "... INF Registered ...".
+        // \b-bounded and uppercase so it won't latch onto a word inside a message.
+        private val LEVEL_RE = Regex("\\b(TRC|DBG|INF|WRN|ERR|FTL|PNC)\\b")
     }
 }

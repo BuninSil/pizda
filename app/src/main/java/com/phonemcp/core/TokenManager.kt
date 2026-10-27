@@ -13,20 +13,28 @@ object TokenManager {
     private const val PREFS = "phone_mcp"
     private const val KEY_TOKEN = "token"
 
+    /**
+     * The token is generated exactly once and then always read back from
+     * SharedPreferences. @Synchronized guards the first-run race (several threads
+     * — the server and the service — call this at startup); commit() (not apply)
+     * writes it to disk synchronously so an aggressive OEM kill right after first
+     * launch can't lose it and cause a new token on the next start.
+     */
+    @Synchronized
     fun getToken(context: Context): String {
         val prefs = context.getSharedPreferences(PREFS, Context.MODE_PRIVATE)
-        var token = prefs.getString(KEY_TOKEN, null)
-        if (token.isNullOrBlank()) {
-            token = generate()
-            prefs.edit().putString(KEY_TOKEN, token).apply()
-        }
+        val existing = prefs.getString(KEY_TOKEN, null)
+        if (!existing.isNullOrBlank()) return existing
+        val token = generate()
+        prefs.edit().putString(KEY_TOKEN, token).commit()
         return token
     }
 
+    @Synchronized
     fun regenerate(context: Context): String {
         val token = generate()
         context.getSharedPreferences(PREFS, Context.MODE_PRIVATE)
-            .edit().putString(KEY_TOKEN, token).apply()
+            .edit().putString(KEY_TOKEN, token).commit()
         return token
     }
 
