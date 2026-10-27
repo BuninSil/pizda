@@ -17,12 +17,12 @@ object AppState {
     @Volatile var running: Boolean = false
         private set
 
-    /** Full connector URL incl. token, e.g. https://foo-bar.trycloudflare.com/<token>/mcp */
+    /** Full connector URL incl. token, e.g. https://<worker>/<token>/mcp */
     @Volatile var connectorUrl: String? = null
         private set
 
-    /** Raw tunnel base (e.g. https://foo-bar.trycloudflare.com), without token/path. */
-    @Volatile var tunnelBase: String? = null
+    /** Whether the phone's relay WebSocket to the Worker is currently connected. */
+    @Volatile var relayConnected: Boolean = false
 
     /** Human-readable status line for the UI/notification. */
     @Volatile var status: String = "Остановлено"

@@ -125,7 +125,7 @@ class MainActivity : Activity(), AppState.Listener {
         masterSwitch.isChecked = AppState.running
         statusText.text = AppState.status
         val url = AppState.connectorUrl
-        connectorUrl.text = url ?: "— туннель ещё не поднят —"
+        connectorUrl.text = url ?: "— адрес ещё не готов —"
         logText.text = ToolLog.formatted()
     }
 
@@ -276,21 +276,19 @@ class MainActivity : Activity(), AppState.Listener {
             setPadding(pad, pad, pad, pad)
         }
         val info = TextView(this).apply {
-            text = "Постоянный адрес без домена. Разверни Worker (worker/phone-mcp-worker.js, " +
-                "инструкция в README), впиши его URL и секрет. Коннектор станет " +
-                "https://<worker>/<токен>/mcp и больше не будет меняться. Пусто = обычный туннель."
+            text = "Релей-адрес. Телефон держит исходящий WSS к воркеру (worker/phone-mcp-worker.js, " +
+                "инструкция в README) — всё по 443, без туннеля и порта 7844. Коннектор: " +
+                "https://<worker>/<токен>/mcp, не меняется. Секрет вшит в сборку (BuildConfig). " +
+                "Пусто = адрес из сборки по умолчанию."
             textSize = 13f
         }
         val urlLabel = TextView(this).apply { text = "Worker URL (https://имя.аккаунт.workers.dev):" }
         val urlInput = EditText(this).apply {
             setText(Prefs.workerBase(this@MainActivity))
-            hint = "https://phone-mcp.xxx.workers.dev"
+            hint = com.phonemcp.BuildConfig.RELAY_WORKER
         }
-        val secretLabel = TextView(this).apply { text = "UPDATE_SECRET (как в воркере):" }
-        val secretInput = EditText(this).apply { setText(Prefs.workerSecret(this@MainActivity)) }
 
         root.addView(info); root.addView(urlLabel); root.addView(urlInput)
-        root.addView(secretLabel); root.addView(secretInput)
 
         AlertDialog.Builder(this)
             .setTitle("Постоянный адрес (Worker)")
@@ -302,8 +300,7 @@ class MainActivity : Activity(), AppState.Listener {
                     return@setPositiveButton
                 }
                 Prefs.setWorkerBase(this, base)
-                Prefs.setWorkerSecret(this, secretInput.text.toString())
-                Toast.makeText(this, if (base.isEmpty()) "Выключено — обычный туннель" else "Сохранено", Toast.LENGTH_SHORT).show()
+                Toast.makeText(this, if (base.isEmpty()) "Будет адрес из сборки" else "Сохранено", Toast.LENGTH_SHORT).show()
                 if (AppState.running) {
                     val intent = Intent(this, McpForegroundService::class.java)
                         .setAction(McpForegroundService.ACTION_APPLY_WORKER)

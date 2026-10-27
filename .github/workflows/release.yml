@@ -51,6 +51,10 @@ jobs:
         env:
           VERSION_CODE: ${{ github.run_number }}
           VERSION_NAME: 1.0.${{ github.run_number }}
+          # Baked into BuildConfig. RELAY_SECRET must equal the Worker's UPDATE_SECRET.
+          # Set both as repo secrets; RELAY_WORKER is optional (falls back to the default URL).
+          RELAY_SECRET: ${{ secrets.RELAY_SECRET }}
+          RELAY_WORKER: ${{ secrets.RELAY_WORKER }}
         run: |
           chmod +x gradlew
           ./gradlew assembleRelease --no-daemon

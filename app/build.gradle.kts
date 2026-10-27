@@ -25,9 +25,21 @@ android {
 
         buildConfigField("String", "UPDATE_REPO", "\"$updateRepo\"")
 
-        // We only ship the arm64 cloudflared binary (as a native lib). Almost every
-        // modern Android phone is arm64-v8a. Add armeabi-v7a here only if you also
-        // drop a 32-bit cloudflared into jniLibs/armeabi-v7a/.
+        // Relay config baked in at build time. The phone opens an outbound WSS to
+        // this Worker and authenticates with RELAY_SECRET (the same value you set
+        // on the Worker via `wrangler secret put UPDATE_SECRET`). Never commit the
+        // secret: CI passes it as the RELAY_SECRET env var (a GitHub Secret);
+        // local builds fall back to empty and you set the Worker URL in the app.
+        val relayWorker = listOf(
+            project.findProperty("relayWorker") as String?,
+            System.getenv("RELAY_WORKER"),
+        ).firstOrNull { !it.isNullOrBlank() } ?: "https://raspy-dew-5339.vladislav20050705.workers.dev"
+        val relaySecret = System.getenv("RELAY_SECRET") ?: ""
+        buildConfigField("String", "RELAY_WORKER", "\"$relayWorker\"")
+        buildConfigField("String", "RELAY_SECRET", "\"$relaySecret\"")
+
+        // tesseract4android ships native libs for several ABIs; keep only arm64
+        // (every modern phone) to shrink the APK.
         ndk {
             abiFilters += listOf("arm64-v8a")
         }
@@ -79,49 +91,17 @@ android {
         jvmTarget = "17"
     }
 
-    packaging {
-        jniLibs {
-            // CRITICAL: the cloudflared "lib" must be extracted to disk so we can exec it.
-            useLegacyPackaging = true
-        }
-    }
-
     buildFeatures {
         buildConfig = true
     }
 }
 
-// --- Embed cloudflared ----------------------------------------------------
-// The cloudflared binary is COMMITTED at src/main/jniLibs/arm64-v8a/libcloudflared.so.
-// It is a custom GOOS=android + CGO build (see scripts/build-cloudflared-android.sh)
-// that resolves DNS through Android's system resolver. The upstream linux/arm64
-// binary does NOT work on Android (no /etc/resolv.conf -> DNS lookups hit
-// [::1]:53 and fail), so we do NOT download it. This task just verifies the
-// committed binary is present.
-val cloudflaredFile = file("src/main/jniLibs/arm64-v8a/libcloudflared.so")
-
-val verifyCloudflared by tasks.registering {
-    description = "Verify the committed Android cloudflared binary is present."
-    onlyIf { !project.hasProperty("skipCloudflared") }
-    doLast {
-        if (!cloudflaredFile.exists() || cloudflaredFile.length() < 1_000_000) {
-            throw GradleException(
-                "Missing Android cloudflared binary: $cloudflaredFile\n" +
-                "Rebuild it with scripts/build-cloudflared-android.sh (needs Go + Android NDK), " +
-                "or pass -PskipCloudflared to build without the tunnel (Termux fallback)."
-            )
-        }
-        logger.lifecycle("cloudflared (android) present: ${cloudflaredFile.length()} bytes")
-    }
-}
-
-tasks.named("preBuild") { dependsOn(verifyCloudflared) }
-
 dependencies {
     implementation("androidx.core:core-ktx:1.13.1")
     implementation("androidx.lifecycle:lifecycle-service:2.8.4")
-    // Tiny embedded HTTP server for the MCP Streamable-HTTP endpoint on localhost.
-    implementation("org.nanohttpd:nanohttpd:2.3.1")
+    // OkHttp WebSocket: the phone's outbound WSS connection to the relay Worker
+    // (plain 443, so providers/VPNs that kill cloudflared's :7844 don't matter).
+    implementation("com.squareup.okhttp3:okhttp:4.12.0")
     // Offline on-device OCR fallback (rus+eng) for screens with few accessibility
     // texts. Tesseract 4/5 (LSTM) via Tesseract4Android, matching tessdata_fast
     // models in assets. Published on JitPack. Package: com.googlecode.tesseract.android.

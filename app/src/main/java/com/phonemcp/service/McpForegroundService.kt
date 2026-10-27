@@ -14,15 +14,13 @@ import android.os.Handler
 import android.os.IBinder
 import android.os.Looper
 import android.speech.tts.TextToSpeech
+import com.phonemcp.BuildConfig
 import com.phonemcp.R
 import com.phonemcp.core.AppState
 import com.phonemcp.core.Settings
 import com.phonemcp.core.TokenManager
 import com.phonemcp.core.ToolLog
-import com.phonemcp.mcp.McpServer
-import com.phonemcp.core.VpnStatus
-import com.phonemcp.tunnel.CloudflaredManager
-import com.phonemcp.tunnel.DohResolver
+import com.phonemcp.relay.RelayClient
 import com.phonemcp.ui.MainActivity
 import com.phonemcp.update.UpdateManager
 import com.phonemcp.voice.ClaudeLauncher
@@ -31,14 +29,17 @@ import com.phonemcp.voice.VoiceSession
 import java.util.Locale
 
 /**
- * Keeps the MCP server + cloudflared tunnel alive with a persistent
- * notification; also orchestrates the Claude voice call, the silence watchdog
- * (TTS alert), and the floating button.
+ * Keeps the relay WebSocket to the Worker alive with a persistent notification;
+ * also orchestrates the Claude voice call, the silence watchdog (TTS alert), and
+ * the floating button.
+ *
+ * There is no local HTTP server and no tunnel any more: the phone dials out to the
+ * Worker over WSS/443, the Worker's Durable Object pushes Claude's MCP requests
+ * down that socket, and we answer them in-process via [RelayClient] + McpHandler.
  */
 class McpForegroundService : Service() {
 
-    private var server: McpServer? = null
-    private var cloudflared: CloudflaredManager? = null
+    private var relay: RelayClient? = null
     private var started = false
 
     private var tts: TextToSpeech? = null
@@ -54,37 +55,6 @@ class McpForegroundService : Service() {
         override fun run() {
             checkForUpdateAsync()
             updateHandler.postDelayed(this, updateIntervalMs)
-        }
-    }
-
-    // Self-heal: while a Worker is configured, keep re-pushing the current tunnel
-    // base to it so its stable URL always points at a live tunnel even after a
-    // flap where a push was missed.
-    private val workerIntervalMs = 90_000L
-    private val workerTick = object : Runnable {
-        override fun run() {
-            val wb = Settings.workerBase(applicationContext)
-            val base = AppState.tunnelBase
-            if (wb.isNotBlank() && !base.isNullOrBlank()) pushBackendToWorker(wb, base)
-            updateHandler.postDelayed(this, workerIntervalMs)
-        }
-    }
-
-    // Local server liveness: if NanoHTTPD died, cloudflared gets connection
-    // refused on :8765 and the connector returns 502 — so check it and restart.
-    private val serverIntervalMs = 15_000L
-    private val serverTick = object : Runnable {
-        override fun run() {
-            if (started) {
-                // Probe off the main thread (socket connect can block briefly).
-                Thread {
-                    if (started && !isServerAlive()) {
-                        ToolLog.add("server", "сервер не отвечает на :${Config.LOCAL_PORT} — перезапуск", false)
-                        startServer()
-                    }
-                }.start()
-            }
-            updateHandler.postDelayed(this, serverIntervalMs)
         }
     }
 
@@ -111,16 +81,9 @@ class McpForegroundService : Service() {
             started = true
             acquireWakeLock()
             registerNetworkCallback()
-            AppState.setStatus("Запуск сервера…")
-            startServer()
-            tunnelAttempt = 0
-            startTunnel()
+            startRelay()
             // First update check ~30s after start, then every few hours.
             updateHandler.postDelayed(updateTick, 30_000)
-            // Keep the Worker's backend fresh (self-heal after tunnel flaps).
-            updateHandler.postDelayed(workerTick, workerIntervalMs)
-            // Watch the local server and restart it if it dies (prevents 502).
-            updateHandler.postDelayed(serverTick, serverIntervalMs)
         }
 
         if (Settings.overlayEnabled(applicationContext)) showOverlay()
@@ -130,9 +93,59 @@ class McpForegroundService : Service() {
             ACTION_SHOW_OVERLAY -> { Settings.setOverlayEnabled(applicationContext, true); showOverlay() }
             ACTION_HIDE_OVERLAY -> { Settings.setOverlayEnabled(applicationContext, false); overlay?.hide() }
             ACTION_UPDATE -> doUpdateAsync()
-            ACTION_APPLY_WORKER -> AppState.tunnelBase?.let { onTunnelUp(it) }
+            ACTION_APPLY_WORKER -> startRelay() // Worker URL changed — reconnect.
         }
         return START_STICKY
+    }
+
+    // --- Relay ------------------------------------------------------------
+
+    /** The Worker base: the app override if set, else the value baked in at build. */
+    private fun workerBase(): String {
+        val s = Settings.workerBase(applicationContext)
+        return (if (s.isNotBlank()) s else BuildConfig.RELAY_WORKER).trim().trimEnd('/')
+    }
+
+    private fun startRelay() {
+        // Drop any previous connection first.
+        relay?.stop()
+        relay = null
+
+        val base = workerBase()
+        if (base.isBlank()) {
+            AppState.setStatus("Не задан адрес Worker. Открой «Постоянный адрес» и впиши URL.")
+            ToolLog.add("relay", "worker url пустой", false)
+            return
+        }
+        val token = TokenManager.getToken(applicationContext)
+        // The connector URL is stable the moment we know the Worker + token — it
+        // does not depend on the socket being up (Claude just gets 503 while the
+        // phone is offline). Set it once and keep it.
+        val full = "$base/$token/mcp"
+        AppState.setConnectorUrl(full)
+        copyToClipboard(full)
+        AppState.setStatus("Подключаюсь к релею…")
+        updateNotification("Подключаюсь к релею…", full)
+
+        val r = RelayClient(
+            context = applicationContext,
+            workerBase = base,
+            secret = BuildConfig.RELAY_SECRET,
+            onState = { connected -> onRelayState(connected, full) },
+        )
+        relay = r
+        r.start()
+    }
+
+    private fun onRelayState(connected: Boolean, connectorFull: String) {
+        AppState.relayConnected = connected
+        if (connected) {
+            AppState.setStatus("На связи. Постоянный адрес готов.")
+            updateNotification("Коннектор готов (постоянный)", connectorFull)
+        } else {
+            AppState.setStatus("Связь с релеем потеряна — переподключаюсь…")
+            updateNotification("Переподключаюсь к релею…", connectorFull)
+        }
     }
 
     // --- In-app update ----------------------------------------------------
@@ -179,153 +192,10 @@ class McpForegroundService : Service() {
         getSystemService(NotificationManager::class.java).notify(Config.UPDATE_ID, n)
     }
 
-    private fun startServer() {
-        // Drop any previous (possibly dead) instance so the port is free.
-        try { server?.stop() } catch (_: Exception) {}
-        server = null
-        try {
-            val s = McpServer(applicationContext, Config.LOCAL_PORT)
-            s.start(0, false)
-            server = s
-            AppState.setStatus("Сервер на 127.0.0.1:${Config.LOCAL_PORT}. Поднимаю туннель…")
-            ToolLog.add("server", "started on :${Config.LOCAL_PORT}", true)
-        } catch (e: Exception) {
-            AppState.setStatus("Ошибка сервера: ${e.message}")
-            ToolLog.add("server", "error: ${e.message}", false)
-        }
-    }
-
-    /** True if NanoHTTPD is alive AND the port actually accepts a TCP connection. */
-    private fun isServerAlive(): Boolean {
-        val s = server ?: return false
-        if (!s.isAlive) return false
-        return try {
-            java.net.Socket().use { sock ->
-                sock.connect(java.net.InetSocketAddress("127.0.0.1", Config.LOCAL_PORT), 1500)
-                true
-            }
-        } catch (e: Exception) {
-            false
-        }
-    }
-
-    private var tunnelAttempt = 0
-    @Volatile private var tunnelBusy = false
-
-    private fun startTunnel() {
-        // Only one tunnel at a time — exit-retry and the network callback can both
-        // fire; without this they spawn several cloudflared processes at once.
-        if (tunnelBusy) return
-        tunnelBusy = true
-        // Kill any previous process before launching a fresh one.
-        cloudflared?.stop()
-        val cf = CloudflaredManager(applicationContext)
-        cloudflared = cf
-        if (!cf.isEmbedded()) {
-            AppState.setStatus(
-                "cloudflared не встроен. Используй Termux (см. README) или запусти туннель на порт ${Config.LOCAL_PORT}."
-            )
-            ToolLog.add("tunnel", "binary not embedded", false)
-            tunnelBusy = false
-            return
-        }
-        tunnelAttempt++
-        // Resolve real edge IPs via DoH off the main thread, then launch.
-        Thread {
-            val edgeIps = try { DohResolver.edgeIps() } catch (e: Exception) { emptyList() }
-            ToolLog.add("tunnel", "edge ips: ${edgeIps.take(3).joinToString(",")}…", true)
-            startTunnelWith(cf, edgeIps)
-            tunnelBusy = false
-        }.start()
-    }
-
-    private fun startTunnelWith(cf: CloudflaredManager, edgeIps: List<String>) {
-        if (VpnStatus.isVpnActive(applicationContext)) {
-            ToolLog.add("tunnel", "VPN активен — если туннель не встанет, добавь приложение в исключения VPN", false)
-        }
-        scheduleVpnWarning()
-        cf.start(
-            localPort = Config.LOCAL_PORT,
-            edgeIps = edgeIps,
-            onUrl = { base -> tunnelAttempt = 0; onTunnelUp(base) },
-            onLog = { line ->
-                ToolLog.add("cloudflared", line, !isBadCloudflaredLine(line))
-            },
-            onExit = { code ->
-                AppState.setConnectorUrl(null)
-                ToolLog.add("tunnel", "exited: $code", false)
-                // Auto-retry a few times unless we were deliberately stopped.
-                if (!cf.stopped && started && tunnelAttempt < MAX_TUNNEL_ATTEMPTS) {
-                    val delay = (3000L * tunnelAttempt).coerceAtMost(30_000L)
-                    AppState.setStatus("Туннель упал (код $code). Перезапуск через ${delay / 1000}с… (попытка ${tunnelAttempt + 1}/$MAX_TUNNEL_ATTEMPTS)")
-                    updateNotification("Перезапускаю туннель…", null)
-                    updateHandler.postDelayed({ if (started) startTunnel() }, delay)
-                } else if (!cf.stopped) {
-                    AppState.setStatus("Туннель не поднялся (код $code). Смотри лог ниже; попробуй ещё раз или Termux.")
-                    updateNotification("Туннель не поднялся", null)
-                }
-            }
-        )
-    }
-
-    private fun onTunnelUp(baseUrl: String) {
-        val token = TokenManager.getToken(applicationContext)
-        AppState.tunnelBase = baseUrl
-        ToolLog.add("tunnel", "up: $baseUrl", true)
-
-        val workerBase = Settings.workerBase(applicationContext)
-        if (workerBase.isNotBlank()) {
-            // Stable URL mode: connector points at the Worker; tell it the new backend.
-            pushBackendToWorker(workerBase, baseUrl)
-            val full = "$workerBase/$token/mcp"
-            AppState.setConnectorUrl(full)
-            AppState.setStatus("Готово. Постоянный адрес (Worker).")
-            copyToClipboard(full)
-            updateNotification("Коннектор готов (постоянный)", full)
-        } else {
-            val full = "$baseUrl/$token/mcp"
-            AppState.setConnectorUrl(full)
-            AppState.setStatus("Готово. Коннектор доступен.")
-            copyToClipboard(full)
-            updateNotification("Коннектор готов", full)
-        }
-    }
-
-    /** If still no connector after 20s and a VPN is on, tell the user what to do. */
-    private fun scheduleVpnWarning() {
-        updateHandler.postDelayed({
-            if (started && AppState.connectorUrl == null && VpnStatus.isVpnActive(applicationContext)) {
-                val msg = "Включён VPN и он, похоже, режет туннель (порт 7844). Добавь это приложение в исключения VPN (split tunneling) и перезапусти сервер."
-                AppState.setStatus(msg)
-                ToolLog.add("tunnel", msg, false)
-                notifySimple("Мешает VPN", msg)
-            }
-        }, 20_000)
-    }
-
-    /**
-     * cloudflared logs come in on stderr, so marking every line ✗ just because it
-     * wasn't stdout was wrong — most of them are INF. Decide by the zerolog level
-     * token (TRC/DBG/INF/WRN/ERR/FTL/PNC) instead: only ERR/FTL/PNC are real
-     * failures. Lines with no level token are our own synthetic notes — fall back
-     * to a word check so a "failed to start" still shows ✗.
-     */
-    private fun isBadCloudflaredLine(line: String): Boolean {
-        val m = LEVEL_RE.find(line)
-        if (m != null) {
-            return when (m.groupValues[1]) {
-                "ERR", "FTL", "PNC" -> true
-                else -> false // TRC, DBG, INF, WRN
-            }
-        }
-        return line.contains("err", true) || line.contains("fail", true) ||
-            line.contains("fatal", true)
-    }
-
     private fun acquireWakeLock() {
         try {
             val pm = getSystemService(Context.POWER_SERVICE) as android.os.PowerManager
-            wakeLock = pm.newWakeLock(android.os.PowerManager.PARTIAL_WAKE_LOCK, "phonemcp:tunnel").apply {
+            wakeLock = pm.newWakeLock(android.os.PowerManager.PARTIAL_WAKE_LOCK, "phonemcp:relay").apply {
                 setReferenceCounted(false)
                 acquire()
             }
@@ -337,36 +207,13 @@ class McpForegroundService : Service() {
             val cm = getSystemService(Context.CONNECTIVITY_SERVICE) as android.net.ConnectivityManager
             val cb = object : android.net.ConnectivityManager.NetworkCallback() {
                 override fun onAvailable(network: android.net.Network) {
-                    // Network (re)appeared — if the tunnel isn't up, restart it.
-                    if (started && AppState.connectorUrl == null) {
-                        updateHandler.post { if (started) { tunnelAttempt = 0; startTunnel() } }
-                    }
+                    // Network (re)appeared — nudge the relay to reconnect at once.
+                    if (started) relay?.reconnect()
                 }
             }
             cm.registerDefaultNetworkCallback(cb)
             netCallback = cb
         } catch (_: Exception) {}
-    }
-
-    /** Push the current tunnel base to the Worker proxy so its stable URL forwards here. */
-    private fun pushBackendToWorker(workerBase: String, backend: String) {
-        Thread {
-            try {
-                val conn = (java.net.URL("$workerBase/__set").openConnection() as java.net.HttpURLConnection).apply {
-                    requestMethod = "POST"
-                    connectTimeout = 15000; readTimeout = 15000
-                    doOutput = true
-                    setRequestProperty("Content-Type", "application/json")
-                    setRequestProperty("X-Update-Secret", Settings.workerSecret(applicationContext))
-                }
-                conn.outputStream.use { it.write("{\"url\":\"$backend\"}".toByteArray()) }
-                val code = conn.responseCode
-                conn.disconnect()
-                ToolLog.add("worker", if (code == 200) "backend обновлён" else "ошибка обновления: HTTP $code", code == 200)
-            } catch (e: Exception) {
-                ToolLog.add("worker", "не достучался до воркера: ${e.message}", false)
-            }
-        }.start()
     }
 
     private fun copyToClipboard(text: String) {
@@ -424,7 +271,7 @@ class McpForegroundService : Service() {
         if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.O) {
             val main = NotificationChannel(
                 Config.NOTIF_CHANNEL, "Phone MCP", NotificationManager.IMPORTANCE_LOW
-            ).apply { description = "MCP server & tunnel status" }
+            ).apply { description = "MCP relay status" }
             val alert = NotificationChannel(
                 Config.ALERT_CHANNEL, "Phone MCP alerts", NotificationManager.IMPORTANCE_HIGH
             ).apply { description = "Claude silence / limit alerts" }
@@ -502,18 +349,15 @@ class McpForegroundService : Service() {
         watchdog?.stop()
         overlay?.hide()
         updateHandler.removeCallbacks(updateTick)
-        updateHandler.removeCallbacks(workerTick)
-        updateHandler.removeCallbacks(serverTick)
         try { netCallback?.let { (getSystemService(Context.CONNECTIVITY_SERVICE) as android.net.ConnectivityManager).unregisterNetworkCallback(it) } } catch (_: Exception) {}
         netCallback = null
         try { if (wakeLock?.isHeld == true) wakeLock?.release() } catch (_: Exception) {}
         wakeLock = null
         VoiceSession.end()
-        server?.stop()
-        cloudflared?.stop()
+        relay?.stop()
+        relay = null
         tts?.shutdown()
-        server = null
-        cloudflared = null
+        AppState.relayConnected = false
         AppState.setConnectorUrl(null)
         AppState.setRunning(false)
         AppState.setStatus("Остановлено")
@@ -528,9 +372,5 @@ class McpForegroundService : Service() {
         const val ACTION_HIDE_OVERLAY = "com.phonemcp.HIDE_OVERLAY"
         const val ACTION_UPDATE = "com.phonemcp.UPDATE"
         const val ACTION_APPLY_WORKER = "com.phonemcp.APPLY_WORKER"
-        private const val MAX_TUNNEL_ATTEMPTS = 100
-        // zerolog level token as cloudflared prints it, e.g. "... INF Registered ...".
-        // \b-bounded and uppercase so it won't latch onto a word inside a message.
-        private val LEVEL_RE = Regex("\\b(TRC|DBG|INF|WRN|ERR|FTL|PNC)\\b")
     }
 }
