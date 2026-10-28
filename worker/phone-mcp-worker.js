@@ -31,7 +31,11 @@
  */
 
 const RESPONSE_TIMEOUT_MS = 60_000;
-const LIST_TIMEOUT_MS = 15_000; // internal tools/list fan-out to a device
+const LIST_TIMEOUT_MS = 5_000; // internal tools/list fan-out to a device
+// Exact keepalive strings. Both devices MUST send this literal so the runtime's
+// auto-response matches it and answers WITHOUT waking the Durable Object.
+const PING = '{"type":"ping"}';
+const PONG = '{"type":"pong"}';
 
 function b64ToBytes(b64) {
   const bin = atob(b64);
@@ -77,18 +81,21 @@ export class PhoneRelay {
     this.env = env;
     this.pending = new Map(); // id -> { resolve, timer, writer, started }
     this.everConnected = false; // a phone has connected at least once
-    this.lastPingPhone = 0;
-    this.lastPingLaptop = 0;
     this.laptopEnabled = true; // laptop tools exposed when online (toggle hides them)
+    // Keepalive pings are answered by the runtime itself, so a 20s ping never
+    // wakes a hibernating DO (online is read from getWebSockets, not from pings).
+    try {
+      ctx.setWebSocketAutoResponse(new WebSocketRequestResponsePair(PING, PONG));
+    } catch (_) {}
     ctx.blockConcurrencyWhile(async () => {
       this.everConnected = (await ctx.storage.get("everConnected")) || false;
-      this.lastPingPhone = (await ctx.storage.get("lastPingPhone")) || 0;
-      this.lastPingLaptop = (await ctx.storage.get("lastPingLaptop")) || 0;
       const le = await ctx.storage.get("laptopEnabled");
       this.laptopEnabled = le === undefined ? true : le;
     });
   }
 
+  // Online is derived ONLY from the live hibernatable sockets — no in-memory
+  // flags, so it survives the DO sleeping and waking.
   socket(tag) {
     const socks = this.ctx.getWebSockets(tag);
     return socks.length ? socks[0] : null;
@@ -169,11 +176,25 @@ export class PhoneRelay {
 
     // Add the laptop's tools when it's online AND enabled.
     const laptop = this.socket("laptop");
-    if (this.laptopEnabled && laptop && phoneJson && phoneJson.result && Array.isArray(phoneJson.result.tools)) {
+    const phoneCount = phoneJson && phoneJson.result && Array.isArray(phoneJson.result.tools)
+      ? phoneJson.result.tools.length : -1;
+    if (!this.laptopEnabled) {
+      console.log("tools/list: laptop skipped (toggle off), phone tools=" + phoneCount);
+    } else if (!laptop) {
+      console.log("tools/list: laptop skipped (offline), phone tools=" + phoneCount);
+    } else if (phoneCount < 0) {
+      console.log("tools/list: phone reply not a tools result, passing through");
+    } else {
       const lapObj = await this.queryDevice("laptop", pathname, { jsonrpc: "2.0", id: "ll", method: "tools/list" }, LIST_TIMEOUT_MS);
       const lapTools = lapObj && lapObj.result && Array.isArray(lapObj.result.tools) ? lapObj.result.tools : [];
-      const have = new Set(phoneJson.result.tools.map((t) => t.name));
-      for (const t of lapTools) if (!have.has(t.name)) phoneJson.result.tools.push(t);
+      if (!lapObj) {
+        console.log("tools/list: laptop did NOT answer in " + LIST_TIMEOUT_MS + "ms — phone-only");
+      } else {
+        const have = new Set(phoneJson.result.tools.map((t) => t.name));
+        let added = 0;
+        for (const t of lapTools) if (!have.has(t.name)) { phoneJson.result.tools.push(t); added++; }
+        console.log("tools/list: merged phone=" + phoneCount + " + laptop=" + added);
+      }
     }
 
     const outHeaders = {};
@@ -183,6 +204,8 @@ export class PhoneRelay {
 
   async handleLaptopCall(pathname, headers, bodyBytes, rpc) {
     const laptop = this.socket("laptop");
+    const name = (rpc.params && rpc.params.name) || "?";
+    console.log("route laptop_call " + name + " enabled=" + this.laptopEnabled + " online=" + !!laptop);
     if (!this.laptopEnabled || !laptop) {
       // A proper MCP tool error (result with isError), so Claude surfaces it cleanly.
       return jsonResponse({
@@ -211,14 +234,20 @@ export class PhoneRelay {
     }
     if (this.env.UPDATE_SECRET) {
       const given = request.headers.get("x-update-secret") || "";
-      if (given !== this.env.UPDATE_SECRET) return new Response("forbidden", { status: 403 });
+      if (given !== this.env.UPDATE_SECRET) {
+        console.log("connect rejected: bad secret, tag=" + tag);
+        return new Response("forbidden", { status: 403 });
+      }
     }
     const pair = new WebSocketPair();
     this.ctx.acceptWebSocket(pair[1], [tag]);
+    // Per-socket metadata survives hibernation via the attachment, not memory.
+    try { pair[1].serializeAttachment({ tag, at: Date.now() }); } catch (_) {}
     if (tag === "phone" && !this.everConnected) {
       this.everConnected = true;
       await this.ctx.storage.put("everConnected", true);
     }
+    console.log("connect: tag=" + tag + " now phone=" + !!this.socket("phone") + " laptop=" + !!this.socket("laptop"));
     return new Response(null, { status: 101, webSocket: pair[0] });
   }
 
@@ -239,14 +268,15 @@ export class PhoneRelay {
   }
 
   handleStatus() {
-    const ago = (t) => (t ? Math.round((Date.now() - t) / 1000) : null);
+    const phone = !!this.socket("phone");
+    const laptop = !!this.socket("laptop");
     return jsonResponse({
-      phone: { connected: !!this.socket("phone"), lastPingAgoSec: ago(this.lastPingPhone) },
-      laptop: {
-        connected: !!this.socket("laptop"),
-        enabled: this.laptopEnabled,
-        lastPingAgoSec: ago(this.lastPingLaptop),
-      },
+      // Flat bools (from getWebSockets + storage), plus nested for the app.
+      phone_connected: phone,
+      laptop_connected: laptop,
+      laptop_enabled: this.laptopEnabled,
+      phone: { connected: phone },
+      laptop: { connected: laptop, enabled: this.laptopEnabled },
       everConnected: this.everConnected,
     });
   }
@@ -295,12 +325,10 @@ export class PhoneRelay {
       return;
     }
 
+    // Pings are handled by setWebSocketAutoResponse and never reach here. If an
+    // old client still sends one through this path, just answer and don't wake further.
     if (msg.type === "ping") {
-      const tags = this.ctx.getTags(ws);
-      const now = Date.now();
-      if (tags.includes("laptop")) { this.lastPingLaptop = now; await this.ctx.storage.put("lastPingLaptop", now); }
-      else { this.lastPingPhone = now; await this.ctx.storage.put("lastPingPhone", now); }
-      try { ws.send(JSON.stringify({ type: "pong" })); } catch (_) {}
+      try { ws.send(PONG); } catch (_) {}
       return;
     }
 
@@ -334,10 +362,17 @@ export class PhoneRelay {
   }
 
   webSocketClose(ws, code, reason, wasClean) {
-    // Device dropped; outstanding requests will hit their timeout.
+    // Only this socket is gone; getWebSockets() stops returning it on its own, so
+    // there is no per-socket state to clean. Outstanding requests time out.
+    let tag = "?";
+    try { tag = (ws.deserializeAttachment() || {}).tag || "?"; } catch (_) {}
+    console.log("close: tag=" + tag + " code=" + code + " clean=" + wasClean +
+      " now phone=" + !!this.socket("phone") + " laptop=" + !!this.socket("laptop"));
   }
 
   webSocketError(ws, error) {
-    // Same as close.
+    let tag = "?";
+    try { tag = (ws.deserializeAttachment() || {}).tag || "?"; } catch (_) {}
+    console.log("error: tag=" + tag + " " + error);
   }
 }

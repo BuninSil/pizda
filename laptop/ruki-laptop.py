@@ -326,6 +326,84 @@ def t_find_on_screen(a):
 
 # --- displays ---------------------------------------------------------------
 
+def t_describe_screen(a):
+    # Text equivalent of the screen for voice mode (Claude can't see images).
+    # Default crops to the active window + downscales so tesseract is quick on an
+    # Atom; full=true does the whole screen. Returns lines with screen coords.
+    if (e := need("tesseract", "tesseract-ocr tesseract-ocr-rus")):
+        return text_result("OCR недоступен: " + e, True)
+    if (e := need("scrot", "scrot")):
+        return text_result(e, True)
+    raw = tempfile.mktemp(suffix=".png")
+    scaled = tempfile.mktemp(suffix=".png")
+    base = tempfile.mktemp()
+    try:
+        ox, oy = 0, 0
+        if a.get("full"):
+            rc, _, err = run(["scrot", "-o", raw], timeout=20)
+        else:
+            _, geo, _ = run(["bash", "-lc", "xdotool getactivewindow getwindowgeometry --shell"])
+            g = {}
+            for ln in geo.splitlines():
+                if "=" in ln:
+                    k, v = ln.split("=", 1)
+                    g[k.strip()] = v.strip()
+            if g.get("WIDTH"):
+                ox, oy = int(g.get("X", 0)), int(g.get("Y", 0))
+                rc, _, err = run(["scrot", "-o", "-a", "%s,%s,%s,%s" % (ox, oy, g["WIDTH"], g["HEIGHT"]), raw], timeout=20)
+            else:
+                rc, _, err = run(["scrot", "-o", raw], timeout=20)
+        if rc != 0:
+            return text_result("scrot: " + err, True)
+        # Downscale 50% for speed; remember the factor to map coords back to screen px.
+        scale = 1.0
+        img = raw
+        if have("convert"):
+            rc2, _, _ = run(["convert", raw, "-resize", "50%", scaled], timeout=25)
+            if rc2 == 0 and os.path.exists(scaled):
+                img, scale = scaled, 2.0
+        rc3, _, e3 = run(["tesseract", img, base, "-l", "rus+eng", "--psm", "6", "tsv"], timeout=90)
+        tsv = base + ".tsv"
+        if rc3 != 0 or not os.path.exists(tsv):
+            return text_result("tesseract: " + e3, True)
+        lines = {}
+        with open(tsv, "r", encoding="utf-8", errors="replace") as f:
+            next(f, None)
+            for ln in f:
+                c = ln.rstrip("\n").split("\t")
+                if len(c) < 12:
+                    continue
+                txt = c[11].strip()
+                if not txt:
+                    continue
+                key = (c[2], c[3], c[4])  # block, par, line
+                left, top, w, h = int(c[6]), int(c[7]), int(c[8]), int(c[9])
+                L = lines.setdefault(key, {"words": [], "l": left, "t": top, "r": left + w, "b": top + h})
+                L["words"].append(txt)
+                L["l"] = min(L["l"], left); L["t"] = min(L["t"], top)
+                L["r"] = max(L["r"], left + w); L["b"] = max(L["b"], top + h)
+        out = []
+        for L in lines.values():
+            out.append({
+                "text": " ".join(L["words"]),
+                "cx": int((L["l"] + L["r"]) / 2 * scale) + ox,
+                "cy": int((L["t"] + L["b"]) / 2 * scale) + oy,
+            })
+        try:
+            os.remove(tsv)
+        except OSError:
+            pass
+        if not out:
+            return text_result("текста не распознано (экран без текста или слишком мелкий шрифт)")
+        return text_result(json.dumps(out, ensure_ascii=False))
+    finally:
+        for p in (raw, scaled):
+            try:
+                os.remove(p)
+            except OSError:
+                pass
+
+
 def t_displays_list(a):
     return ok_or(*run(["xrandr", "--query"]))
 
@@ -974,6 +1052,7 @@ REGISTRY = [
     ("laptop_window_state", "Состояние окна: action minimize|maximize|unmaximize|fullscreen|unfullscreen.", S({"window": STR, "action": STR}, ["window"]), t_window_state),
     ("laptop_workspace_switch", "Переключить рабочий стол (index).", S({"index": N}, ["index"]), t_workspace_switch),
     ("laptop_find_on_screen", "Найти текст на экране через tesseract (вернёт центры). Нет пакета — честно скажет.", S({"text": STR}, ["text"]), t_find_on_screen),
+    ("laptop_describe_screen", "Текстовое описание экрана (OCR rus+eng): строки с координатами центра. По умолчанию активное окно (быстрее на слабом CPU), full=true — весь экран. Для голосового режима, где картинки не доходят.", S({"full": BOOL}), t_describe_screen),
 
     ("laptop_displays_list", "xrandr --query: выходы и режимы.", S(), t_displays_list),
     ("laptop_display_set", "Настроить выход: output, enabled, resolution, position(right_of/left_of/same_as)+reference, scale, rotate, save.", S({"output": STR, "enabled": BOOL, "resolution": STR, "position": STR, "reference": STR, "scale": STR, "rotate": STR, "save": BOOL}, ["output"]), t_display_set),
@@ -1114,7 +1193,7 @@ def main():
             while True:
                 time.sleep(20)
                 try:
-                    ws.send(json.dumps({"type": "ping"}))
+                    ws.send('{"type":"ping"}')  # exact literal: lets the DO auto-respond without waking
                 except Exception:
                     return
         threading.Thread(target=pinger, daemon=True).start()
