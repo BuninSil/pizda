@@ -1,25 +1,37 @@
 /**
- * Phone MCP — relay Worker (Durable Object).
+ * Phone MCP — relay Worker (Durable Object), multi-device.
  *
- * Replaces the old cloudflared Quick Tunnel. The phone opens ONE outbound
- * WebSocket to this Worker over plain 443 (wss://<worker>/<token>/__phone), so
- * providers and VPNs that kill cloudflared's :7844 edge can't break it. Claude's
- * MCP requests to https://<worker>/<token>/mcp are routed to a Durable Object
- * (one instance per token), packed into JSON, pushed to the phone over that
- * socket, and the phone's reply is streamed straight back.
+ * The phone (and, optionally, a laptop) each open ONE outbound WebSocket to this
+ * Worker over plain 443:
+ *   phone:  wss://<worker>/<token>/__phone
+ *   laptop: wss://<worker>/<token>/__laptop
+ * both with header x-update-secret. Claude's MCP requests hit
+ *   https://<worker>/<token>/mcp
+ * and the Durable Object (one instance per token) relays them to a device.
  *
- * Setup (no domain needed):
- *   cd worker
- *   npm i -g wrangler
- *   wrangler login
- *   wrangler secret put UPDATE_SECRET      # same value baked into the app (RELAY_SECRET)
- *   wrangler deploy
+ * Routing:
+ *   - initialize / ping / sessions / notifications  -> phone (authoritative)
+ *   - tools/list   -> query BOTH devices, merge (laptop tools are named laptop_*,
+ *                     and only included when the laptop is online AND enabled)
+ *   - tools/call   -> name starts with "laptop_" -> laptop, else -> phone
+ *   - GET/DELETE/file -> phone
  *
- * Connector URL (paste into Claude once), where <token> is shown in the app:
- *   https://<name>.<you>.workers.dev/<token>/mcp
+ * A device speaks a tiny frame protocol over its socket:
+ *   worker -> device : {id, method, path, headers, bodyB64}
+ *   device -> worker : {id, status, headers, bodyB64}   (or stream: {id,stream}/{id,chunkB64}/{id,end})
+ *   device -> worker : {type:"ping"}  (keepalive; worker replies {type:"pong"})
+ *
+ * Control:
+ *   POST /<token>/__laptop_toggle  {enabled:true|false}  (x-update-secret)
+ *   GET  /<token>/__status         status of both devices + the toggle
+ *
+ * Setup:
+ *   cd worker && wrangler login && wrangler deploy
+ *   (optional secret) wrangler secret put UPDATE_SECRET  == app RELAY_SECRET
  */
 
 const RESPONSE_TIMEOUT_MS = 60_000;
+const LIST_TIMEOUT_MS = 15_000; // internal tools/list fan-out to a device
 
 function b64ToBytes(b64) {
   const bin = atob(b64);
@@ -38,6 +50,13 @@ function bytesToB64(bytes) {
   return btoa(bin);
 }
 
+function jsonResponse(obj, status = 200, extraHeaders = {}) {
+  return new Response(JSON.stringify(obj), {
+    status,
+    headers: { "content-type": "application/json; charset=utf-8", ...extraHeaders },
+  });
+}
+
 export default {
   async fetch(request, env) {
     const url = new URL(request.url);
@@ -45,9 +64,6 @@ export default {
     if (parts.length === 0) {
       return new Response("phone-mcp relay ok", { status: 200 });
     }
-    // First path segment is the secret token. Everything for a token goes to the
-    // same Durable Object instance, so only the instance whose phone is connected
-    // can answer — a wrong token lands on an empty instance and gets 404.
     const token = parts[0];
     const id = env.PHONE_RELAY.idFromName(token);
     const stub = env.PHONE_RELAY.get(id);
@@ -59,35 +75,41 @@ export class PhoneRelay {
   constructor(ctx, env) {
     this.ctx = ctx;
     this.env = env;
-    // id -> { resolve, timer, writer, started }
-    this.pending = new Map();
-    this.everConnected = false;
-    this.lastPing = 0;
+    this.pending = new Map(); // id -> { resolve, timer, writer, started }
+    this.everConnected = false; // a phone has connected at least once
+    this.lastPingPhone = 0;
+    this.lastPingLaptop = 0;
+    this.laptopEnabled = true; // laptop tools exposed when online (toggle hides them)
     ctx.blockConcurrencyWhile(async () => {
       this.everConnected = (await ctx.storage.get("everConnected")) || false;
-      this.lastPing = (await ctx.storage.get("lastPing")) || 0;
+      this.lastPingPhone = (await ctx.storage.get("lastPingPhone")) || 0;
+      this.lastPingLaptop = (await ctx.storage.get("lastPingLaptop")) || 0;
+      const le = await ctx.storage.get("laptopEnabled");
+      this.laptopEnabled = le === undefined ? true : le;
     });
   }
 
-  phoneSocket() {
-    const socks = this.ctx.getWebSockets("phone");
+  socket(tag) {
+    const socks = this.ctx.getWebSockets(tag);
     return socks.length ? socks[0] : null;
   }
 
   async fetch(request) {
     const url = new URL(request.url);
     const parts = url.pathname.split("/").filter(Boolean);
-    const rest = parts.slice(1).join("/"); // path after the token
+    const token = parts[0];
+    const rest = parts.slice(1).join("/");
 
-    if (rest === "__phone") return this.handlePhoneConnect(request);
+    if (rest === "__phone") return this.handleDeviceConnect(request, "phone");
+    if (rest === "__laptop") return this.handleDeviceConnect(request, "laptop");
+    if (rest === "__laptop_toggle") return this.handleLaptopToggle(request);
     if (rest === "__status") return this.handleStatus();
 
-    // A request from Claude — relay it to the phone.
-    const sock = this.phoneSocket();
-    if (!sock) {
+    // Everything else is an MCP request from Claude. The phone is the primary
+    // device: without it there is no session/initialize, so gate on it.
+    const phone = this.socket("phone");
+    if (!phone) {
       if (!this.everConnected) {
-        // Unknown token (no phone ever registered on this instance). 404, NOT 401:
-        // claude.ai treats 401 as an OAuth requirement and aborts the connect.
         return new Response(
           "unknown path/token — not an OAuth-protected resource. Check the connector URL.",
           { status: 404, headers: { "content-type": "text/plain; charset=utf-8" } },
@@ -98,67 +120,147 @@ export class PhoneRelay {
         { status: 503, headers: { "content-type": "text/plain; charset=utf-8" } },
       );
     }
-    return this.relay(request, sock, url.pathname, url.search);
-  }
 
-  async handlePhoneConnect(request) {
-    if (request.headers.get("Upgrade") !== "websocket") {
-      return new Response("expected websocket", { status: 426 });
-    }
-    // Authenticate the phone. The secret is optional only if UPDATE_SECRET is unset.
-    if (this.env.UPDATE_SECRET) {
-      const given = request.headers.get("x-update-secret") || "";
-      if (given !== this.env.UPDATE_SECRET) {
-        return new Response("forbidden", { status: 403 });
+    const headers = this.headerObj(request);
+
+    // Intercept MCP POSTs so we can route/merge across devices.
+    if (request.method === "POST" && rest === "mcp") {
+      const bodyBytes = new Uint8Array(await request.arrayBuffer());
+      let rpc = null;
+      try { rpc = JSON.parse(new TextDecoder().decode(bodyBytes)); } catch (_) {}
+
+      if (rpc && !Array.isArray(rpc) && typeof rpc === "object") {
+        if (rpc.method === "tools/list") {
+          return this.handleToolsList(url.pathname, headers, bodyBytes);
+        }
+        const name = rpc.method === "tools/call" ? (rpc.params && rpc.params.name) || "" : "";
+        if (rpc.method === "tools/call" && name.startsWith("laptop_")) {
+          return this.handleLaptopCall(url.pathname, headers, bodyBytes, rpc);
+        }
       }
+      // Default: straight to the phone.
+      return this.forwardFrame(phone, request.method, url.pathname + url.search, headers, bodyBytes);
     }
-    const pair = new WebSocketPair();
-    // Hibernation API: the runtime can evict us between messages and still deliver
-    // them to webSocketMessage/Close. Tag the socket so getWebSockets("phone") finds it.
-    this.ctx.acceptWebSocket(pair[1], ["phone"]);
-    if (!this.everConnected) {
-      this.everConnected = true;
-      await this.ctx.storage.put("everConnected", true);
-    }
-    return new Response(null, { status: 101, webSocket: pair[0] });
+
+    // GET (SSE) / DELETE / file — forward to the phone unchanged.
+    return this.forwardFrame(phone, request.method, url.pathname + url.search, headers, null);
   }
 
-  handleStatus() {
-    const connected = !!this.phoneSocket();
-    const body = {
-      connected,
-      everConnected: this.everConnected,
-      lastPingMs: this.lastPing || null,
-      lastPingAgoSec: this.lastPing ? Math.round((Date.now() - this.lastPing) / 1000) : null,
-    };
-    return new Response(JSON.stringify(body), {
-      headers: { "content-type": "application/json; charset=utf-8" },
-    });
-  }
-
-  async relay(request, sock, pathname, search) {
-    const id = crypto.randomUUID();
-
+  headerObj(request) {
     const headers = {};
     for (const [k, v] of request.headers) {
       const lk = k.toLowerCase();
       if (lk === "host" || lk === "connection" || lk === "x-update-secret") continue;
       headers[lk] = v;
     }
+    return headers;
+  }
 
-    let bodyB64 = "";
-    if (request.method !== "GET" && request.method !== "HEAD") {
-      const buf = await request.arrayBuffer();
-      if (buf.byteLength) bodyB64 = bytesToB64(buf);
+  // --- tools/list fan-out + merge --------------------------------------
+
+  async handleToolsList(pathname, headers, bodyBytes) {
+    const phone = this.socket("phone");
+    const phoneResp = await this.forwardFrame(phone, "POST", pathname, headers, bodyBytes);
+    const phoneText = await phoneResp.text();
+    let phoneJson;
+    try { phoneJson = JSON.parse(phoneText); } catch (_) {
+      return new Response(phoneText, { status: phoneResp.status, headers: phoneResp.headers });
     }
 
+    // Add the laptop's tools when it's online AND enabled.
+    const laptop = this.socket("laptop");
+    if (this.laptopEnabled && laptop && phoneJson && phoneJson.result && Array.isArray(phoneJson.result.tools)) {
+      const lapObj = await this.queryDevice("laptop", pathname, { jsonrpc: "2.0", id: "ll", method: "tools/list" }, LIST_TIMEOUT_MS);
+      const lapTools = lapObj && lapObj.result && Array.isArray(lapObj.result.tools) ? lapObj.result.tools : [];
+      const have = new Set(phoneJson.result.tools.map((t) => t.name));
+      for (const t of lapTools) if (!have.has(t.name)) phoneJson.result.tools.push(t);
+    }
+
+    const outHeaders = {};
+    for (const [k, v] of phoneResp.headers) outHeaders[k] = v;
+    return new Response(JSON.stringify(phoneJson), { status: 200, headers: outHeaders });
+  }
+
+  async handleLaptopCall(pathname, headers, bodyBytes, rpc) {
+    const laptop = this.socket("laptop");
+    if (!this.laptopEnabled || !laptop) {
+      // A proper MCP tool error (result with isError), so Claude surfaces it cleanly.
+      return jsonResponse({
+        jsonrpc: "2.0",
+        id: rpc.id ?? null,
+        result: { content: [{ type: "text", text: "laptop offline — ноут не подключён или выключен тумблером" }], isError: true },
+      });
+    }
+    return this.forwardFrame(laptop, "POST", pathname, headers, bodyBytes);
+  }
+
+  /** Send a synthesized JSON-RPC request to a device and parse its JSON reply. */
+  async queryDevice(tag, pathname, bodyObj, timeoutMs) {
+    const sock = this.socket(tag);
+    if (!sock) return null;
+    const bytes = new TextEncoder().encode(JSON.stringify(bodyObj));
+    const resp = await this.forwardFrame(sock, "POST", pathname, { "content-type": "application/json" }, bytes, timeoutMs);
+    try { return JSON.parse(await resp.text()); } catch (_) { return null; }
+  }
+
+  // --- device connect / toggle / status --------------------------------
+
+  async handleDeviceConnect(request, tag) {
+    if (request.headers.get("Upgrade") !== "websocket") {
+      return new Response("expected websocket", { status: 426 });
+    }
+    if (this.env.UPDATE_SECRET) {
+      const given = request.headers.get("x-update-secret") || "";
+      if (given !== this.env.UPDATE_SECRET) return new Response("forbidden", { status: 403 });
+    }
+    const pair = new WebSocketPair();
+    this.ctx.acceptWebSocket(pair[1], [tag]);
+    if (tag === "phone" && !this.everConnected) {
+      this.everConnected = true;
+      await this.ctx.storage.put("everConnected", true);
+    }
+    return new Response(null, { status: 101, webSocket: pair[0] });
+  }
+
+  async handleLaptopToggle(request) {
+    if (request.method !== "POST") return new Response("POST only", { status: 405 });
+    if (this.env.UPDATE_SECRET) {
+      const given = request.headers.get("x-update-secret") || "";
+      if (given !== this.env.UPDATE_SECRET) return new Response("forbidden", { status: 403 });
+    }
+    let body;
+    try { body = await request.json(); } catch (_) { return new Response("bad json", { status: 400 }); }
+    this.laptopEnabled = !!body.enabled;
+    await this.ctx.storage.put("laptopEnabled", this.laptopEnabled);
+    // The set of tools changed; if we held an open SSE stream we'd push
+    // notifications/tools/list_changed here. We don't keep one, so Claude picks
+    // the new list up on its next tools/list (reconnect/refresh).
+    return jsonResponse({ ok: true, laptopEnabled: this.laptopEnabled });
+  }
+
+  handleStatus() {
+    const ago = (t) => (t ? Math.round((Date.now() - t) / 1000) : null);
+    return jsonResponse({
+      phone: { connected: !!this.socket("phone"), lastPingAgoSec: ago(this.lastPingPhone) },
+      laptop: {
+        connected: !!this.socket("laptop"),
+        enabled: this.laptopEnabled,
+        lastPingAgoSec: ago(this.lastPingLaptop),
+      },
+      everConnected: this.everConnected,
+    });
+  }
+
+  // --- frame transport -------------------------------------------------
+
+  async forwardFrame(sock, method, pathWithSearch, headers, bodyBytes, timeoutMs = RESPONSE_TIMEOUT_MS) {
+    const id = crypto.randomUUID();
     const frame = {
       id,
-      method: request.method,
-      // Full path INCLUDING the token, so the phone re-validates the token itself.
-      path: pathname + (search || ""),
+      method,
+      path: pathWithSearch, // includes the token, so the device re-validates it
       headers,
-      bodyB64,
+      bodyB64: bodyBytes && bodyBytes.byteLength ? bytesToB64(bodyBytes) : "",
     };
 
     const responsePromise = new Promise((resolve) => {
@@ -167,9 +269,9 @@ export class PhoneRelay {
         if (p) {
           this.pending.delete(id);
           if (p.writer) { try { p.writer.close(); } catch (_) {} }
-          resolve(new Response("phone timed out", { status: 504 }));
+          resolve(new Response("device timed out", { status: 504 }));
         }
-      }, RESPONSE_TIMEOUT_MS);
+      }, timeoutMs);
       this.pending.set(id, { resolve, timer, writer: null, started: false });
     });
 
@@ -178,13 +280,12 @@ export class PhoneRelay {
     } catch (e) {
       const p = this.pending.get(id);
       if (p) { clearTimeout(p.timer); this.pending.delete(id); }
-      return new Response("failed to reach phone: " + e, { status: 502 });
+      return new Response("failed to reach device: " + e, { status: 502 });
     }
-
     return responsePromise;
   }
 
-  // --- Hibernation socket handlers (phone -> worker) --------------------
+  // --- Hibernation socket handlers (device -> worker) ------------------
 
   async webSocketMessage(ws, data) {
     let msg;
@@ -195,8 +296,10 @@ export class PhoneRelay {
     }
 
     if (msg.type === "ping") {
-      this.lastPing = Date.now();
-      await this.ctx.storage.put("lastPing", this.lastPing);
+      const tags = this.ctx.getTags(ws);
+      const now = Date.now();
+      if (tags.includes("laptop")) { this.lastPingLaptop = now; await this.ctx.storage.put("lastPingLaptop", now); }
+      else { this.lastPingPhone = now; await this.ctx.storage.put("lastPingPhone", now); }
       try { ws.send(JSON.stringify({ type: "pong" })); } catch (_) {}
       return;
     }
@@ -206,7 +309,6 @@ export class PhoneRelay {
     const p = this.pending.get(id);
     if (!p) return;
 
-    // Streaming reply (e.g. SSE): first frame opens a stream, then chunks, then end.
     if (msg.stream && !p.started) {
       p.started = true;
       const { readable, writable } = new TransformStream();
@@ -225,7 +327,6 @@ export class PhoneRelay {
       return;
     }
 
-    // Complete (non-streamed) reply.
     clearTimeout(p.timer);
     this.pending.delete(id);
     const bytes = msg.bodyB64 ? b64ToBytes(msg.bodyB64) : null;
@@ -233,10 +334,10 @@ export class PhoneRelay {
   }
 
   webSocketClose(ws, code, reason, wasClean) {
-    // The phone dropped; outstanding requests will hit their 60s timeout.
+    // Device dropped; outstanding requests will hit their timeout.
   }
 
   webSocketError(ws, error) {
-    // Same as close — let pending requests time out.
+    // Same as close.
   }
 }

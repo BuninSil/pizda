@@ -22,6 +22,7 @@ import android.text.InputType
 import com.phonemcp.R
 import com.phonemcp.core.AppState
 import com.phonemcp.core.Blacklist
+import com.phonemcp.core.RelayControl
 import com.phonemcp.core.Settings as Prefs
 import com.phonemcp.core.TokenManager
 import com.phonemcp.core.ToolLog
@@ -35,6 +36,8 @@ class MainActivity : Activity(), AppState.Listener {
     private lateinit var statusText: TextView
     private lateinit var connectorUrl: TextView
     private lateinit var logText: TextView
+    private lateinit var laptopSwitch: Switch
+    private lateinit var laptopStatus: TextView
 
     override fun onCreate(savedInstanceState: Bundle?) {
         super.onCreate(savedInstanceState)
@@ -60,6 +63,11 @@ class MainActivity : Activity(), AppState.Listener {
         findViewById<Button>(R.id.callClaudeButton).setOnClickListener { callClaude() }
         findViewById<Button>(R.id.voiceSettingsButton).setOnClickListener { voiceSettings() }
         findViewById<Button>(R.id.workerButton).setOnClickListener { workerSettings() }
+
+        laptopSwitch = findViewById(R.id.laptopSwitch)
+        laptopStatus = findViewById(R.id.laptopStatus)
+        laptopSwitch.setOnClickListener { setLaptopEnabled(laptopSwitch.isChecked) }
+        findViewById<Button>(R.id.laptopConfigButton).setOnClickListener { copyLaptopConfig() }
         findViewById<Button>(R.id.updateButton).setOnClickListener { checkUpdates(manual = true) }
         findViewById<TextView>(R.id.versionText).text = "Версия: ${UpdateManager.currentVersionLabel()}"
 
@@ -112,6 +120,42 @@ class MainActivity : Activity(), AppState.Listener {
         super.onResume()
         AppState.addListener(this)
         render()
+        refreshLaptopStatus()
+    }
+
+    // --- Laptop (second device) ------------------------------------------
+
+    private fun setLaptopEnabled(enabled: Boolean) {
+        Toast.makeText(this, if (enabled) "Включаю ноут…" else "Выключаю ноут…", Toast.LENGTH_SHORT).show()
+        Thread {
+            RelayControl.setLaptopEnabled(this, enabled)
+            refreshLaptopStatus()
+        }.start()
+    }
+
+    private fun refreshLaptopStatus() {
+        Thread {
+            val s = RelayControl.status(this)
+            runOnUiThread {
+                if (isFinishing) return@runOnUiThread
+                if (s == null) {
+                    laptopStatus.text = "Ноут: релей недоступен"
+                    return@runOnUiThread
+                }
+                laptopSwitch.isChecked = s.laptopEnabled
+                val online = if (s.laptopConnected) "онлайн" else "оффлайн"
+                val ping = s.laptopPingAgoSec?.let { ", пинг ${it}с назад" } ?: ""
+                val onoff = if (s.laptopEnabled) "" else " (выключен тумблером)"
+                laptopStatus.text = "Ноут: $online$ping$onoff"
+            }
+        }.start()
+    }
+
+    private fun copyLaptopConfig() {
+        val json = RelayControl.laptopConfigJson(this)
+        val cm = getSystemService(Context.CLIPBOARD_SERVICE) as ClipboardManager
+        cm.setPrimaryClip(ClipData.newPlainText("ruki-laptop config", json))
+        Toast.makeText(this, "Конфиг скопирован — вставь в ~/.config/ruki-laptop.json на ноуте", Toast.LENGTH_LONG).show()
     }
 
     override fun onPause() {
