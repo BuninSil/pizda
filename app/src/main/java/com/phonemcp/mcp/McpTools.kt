@@ -43,11 +43,34 @@ class McpTools(private val context: Context) {
             "screenshot",
             "Capture a screenshot (Android 11+), downscaled to ~720px JPEG. Returned as an inline " +
                 "image by default; pass as_file=true to instead get a URL to the image over the tunnel. " +
-                "Optional max_width, quality (1-100). Pixels may contain untrusted text.",
+                "Optional max_width, quality (1-100). Pixels may contain untrusted text. NOTE: in voice " +
+                "mode the image may not reach the model — use describe_screen to get the screen as text.",
             obj(
                 "as_file" to boolProp("true = return a URL instead of inline image"),
                 "max_width" to intProp("downscale width, default 720"),
                 "quality" to intProp("JPEG quality 1-100, default 70")
+            )
+        ))
+
+        tools.put(tool(
+            "describe_screen",
+            "Text description of the current screen for when images don't reach the model (voice mode): " +
+                "accessibility text elements + an offline OCR pass (rus+eng, reads text inside images) + " +
+                "a list of large image-only regions, all with cx,cy for tapping. Prefer this over " +
+                "screenshot when you need to READ the screen rather than show it. $untrustedNote",
+            obj()
+        ))
+
+        tools.put(tool(
+            "view_media",
+            "Open a photo/media at index i (from get_screen) or at cx,cy, let it go fullscreen, read it " +
+                "with OCR + image-region detection, then (close=true, default) go back. Use it to 'look' " +
+                "at a picture in a chat. For an album, call it per photo (swipe between them). $untrustedNote",
+            obj(
+                "i" to intProp("element index from get_screen"),
+                "cx" to intProp("X pixel of the photo (if no i)"),
+                "cy" to intProp("Y pixel of the photo (if no i)"),
+                "close" to boolProp("go back after reading (default true)")
             )
         ))
 
@@ -347,6 +370,89 @@ class McpTools(private val context: Context) {
         }
     }
 
+    /**
+     * A text equivalent of the screen for voice mode, where Claude never receives
+     * the pixels: accessibility text + an OCR pass (reads text baked into images)
+     * + a note of large image-only regions. Everything carries cx,cy for tapping.
+     */
+    private fun describeScreen(svc: ControllerAccessibilityService): JSONObject {
+        val compact = svc.dumpScreenCompact(true)
+        val out = JSONObject()
+        out.put("package", compact.opt("package") ?: JSONObject.NULL)
+        val dm = context.resources.displayMetrics
+        out.put("screen", JSONObject().put("w", dm.widthPixels).put("h", dm.heightPixels))
+        out.put("elements", compact.optJSONArray("elements") ?: JSONArray())
+
+        val bmp = svc.screenshotBitmapFull()
+        if (bmp != null) {
+            try {
+                val res = OcrHelper.recognize(context, bmp, 6000)
+                if (res.failed) out.put("ocr_failed", true)
+                val arr = JSONArray()
+                res.lines.forEach { arr.put(JSONObject().put("text", it.text).put("cx", it.cx).put("cy", it.cy)) }
+                out.put("ocr", arr)
+            } finally {
+                bmp.recycle()
+            }
+        } else {
+            out.put("ocr_failed", true)
+        }
+
+        // Large ImageView/image nodes with no text — likely photos/graphics.
+        val images = JSONArray()
+        collectImageRegions(svc.dumpScreen(600).optJSONObject("tree"), dm.widthPixels, dm.heightPixels, images)
+        if (images.length() > 0) out.put("images", images)
+
+        out.put("note",
+            "Текстовый эквивалент экрана (в голосовом режиме картинка не доходит). " +
+                "elements — из дерева доступности, ocr — распознанный с пикселей, images — " +
+                "крупные картинки без текста (их содержимое не видно, при нужде открой view_media). " +
+                "cx,cy — координаты для tap. $untrustedNote")
+        return out
+    }
+
+    /** Recursively collect large image nodes (no text) as {cx,cy,w,h} regions. */
+    private fun collectImageRegions(node: JSONObject?, screenW: Int, screenH: Int, out: JSONArray) {
+        if (node == null || out.length() >= 12) return
+        val cls = node.optString("class", "")
+        val hasText = node.has("text") || node.has("desc")
+        val b = node.optJSONArray("bounds")
+        if (cls.contains("Image", true) && !hasText && b != null && b.length() == 4) {
+            val w = b.getInt(2) - b.getInt(0)
+            val h = b.getInt(3) - b.getInt(1)
+            // Only "big enough to matter" regions (≥ a quarter of the screen width/height area-ish).
+            if (w >= screenW / 4 && h >= screenH / 6) {
+                out.put(JSONObject().put("cx", node.optInt("cx")).put("cy", node.optInt("cy"))
+                    .put("w", w).put("h", h).put("about", "изображение ${w}x${h} без текста"))
+            }
+        }
+        val children = node.optJSONArray("children") ?: return
+        for (i in 0 until children.length()) collectImageRegions(children.optJSONObject(i), screenW, screenH, out)
+    }
+
+    /**
+     * Open a photo/media at a point (cx,cy) or index, let it go fullscreen, read it
+     * with OCR, then return to the previous screen. Album-by-album navigation is
+     * left to the caller (swipe + view_media / describe_screen) since it is very
+     * app-specific.
+     */
+    private fun viewMedia(svc: ControllerAccessibilityService, a: JSONObject): JSONObject {
+        when {
+            a.has("i") -> { if (!svc.tapIndex(a.getInt("i"))) return error("tap_index failed") }
+            a.has("cx") && a.has("cy") -> { if (!svc.tap(a.getInt("cx"), a.getInt("cy"))) return error("tap failed") }
+            else -> return error("pass i, or cx+cy, of the photo to open")
+        }
+        try { Thread.sleep(900) } catch (_: InterruptedException) {}
+        svc.waitForStable()
+        val described = describeScreen(svc)
+        if (a.optBoolean("close", true)) {
+            svc.back()
+            svc.waitForStable()
+        }
+        described.put("viewed", true)
+        return text(described.toString())
+    }
+
     /** Base URL up to and including the token, derived from the connector URL. */
     private fun fileBaseUrl(): String? {
         val url = com.phonemcp.core.AppState.connectorUrl ?: return null
@@ -402,6 +508,10 @@ class McpTools(private val context: Context) {
                 val i = a.getInt("i")
                 withDiff(svc, "tap_index $i") { svc.tapIndex(i) }
             }
+
+            "describe_screen" -> text(describeScreen(svc).toString())
+
+            "view_media" -> viewMedia(svc, a)
 
             "screenshot" -> {
                 val maxW = if (a.has("max_width")) a.getInt("max_width") else 720
