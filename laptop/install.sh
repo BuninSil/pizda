@@ -24,17 +24,19 @@ curl -fsSL "$RAW" -o ~/.local/bin/ruki-laptop.py
 chmod +x ~/.local/bin/ruki-laptop.py
 
 echo "== конфиг =="
-if [ -f ~/.config/ruki-laptop.json ]; then
-  echo "уже есть ~/.config/ruki-laptop.json — не трогаю"
-else
-  if [ -z "$TOKEN" ]; then
-    echo "!! нет токена. Запусти так: ... | bash -s -- <ТОКЕН> (токен с главного экрана приложения)"
-    exit 1
-  fi
+# Токен передан аргументом -> ВСЕГДА перезаписываем конфиг (чтобы можно было
+# исправить опечатку в токене, просто повторив команду). Без токена — берём
+# существующий конфиг как есть.
+if [ -n "$TOKEN" ]; then
   cat > ~/.config/ruki-laptop.json <<JSON
 { "url": "$WORKER", "token": "$TOKEN", "secret": "" }
 JSON
-  echo "создан ~/.config/ruki-laptop.json"
+  echo "конфиг записан (токен из аргумента)"
+elif [ -f ~/.config/ruki-laptop.json ]; then
+  echo "уже есть ~/.config/ruki-laptop.json, токен не передан — оставляю как есть"
+else
+  echo "!! нет токена и нет конфига. Запусти так: ... | bash -s -- <ТОКЕН>"
+  exit 1
 fi
 
 echo "== sudo без пароля =="
